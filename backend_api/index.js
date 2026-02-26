@@ -59,10 +59,21 @@ const upload = multer({
 });
 
 // ==========================================
-// HEALTH CHECK
+// HEALTH CHECK & ONE-TIME DB SETUP
 // ==========================================
 app.get('/api/health', (req, res) => {
     res.status(200).json({ status: 'ok', msg: 'Hetzner API Backend is running!' });
+});
+
+app.get('/api/init-db', async (req, res) => {
+    try {
+        const { initialize } = require('./init_render');
+        await initialize();
+        res.status(200).json({ status: 'ok', msg: 'Database initialized successfully!' });
+    } catch (err) {
+        console.error('Initialization Error:', err);
+        res.status(500).json({ error: 'DB init failed' });
+    }
 });
 
 // ==========================================

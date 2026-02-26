@@ -70,4 +70,4 @@ async function initialize() {
     }
 }
 
-initialize();
+module.exports = { initialize };
