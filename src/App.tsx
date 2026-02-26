@@ -521,17 +521,33 @@ const LoginView = ({ onLogin }: { onLogin: (user: any) => void }) => {
             </div>
           </div>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full py-3 bg-yellow-500 hover:bg-yellow-400 text-slate-900 font-bold rounded-xl transition-all shadow-lg shadow-yellow-500/20 active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-2"
-          >
-            {loading ? (
-              <span className="animate-spin h-5 w-5 border-2 border-slate-900 border-t-transparent rounded-full"></span>
-            ) : (
-              "Sign In"
-            )}
-          </button>
+          <div className="flex flex-col gap-3">
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full py-3 bg-yellow-500 hover:bg-yellow-400 text-slate-900 font-bold rounded-xl transition-all shadow-lg shadow-yellow-500/20 active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {loading ? (
+                <span className="animate-spin h-5 w-5 border-2 border-slate-900 border-t-transparent rounded-full"></span>
+              ) : (
+                "Sign In"
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onLogin({
+                id: 'dev-super-admin',
+                email: 'superadmin1@samanyudu.tv',
+                name: 'Super Admin (Dev)',
+                role: 'super_admin',
+                district: null
+              })}
+              className="w-full py-2 text-slate-500 hover:text-yellow-500 text-sm font-medium transition-colors"
+            >
+              Skip to Super Admin Portal
+            </button>
+          </div>
         </form>
 
         <div className="mt-8 pt-6 border-t border-slate-800 text-center">

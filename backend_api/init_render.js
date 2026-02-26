@@ -62,6 +62,10 @@ async function initialize() {
             }
             console.log(`Finished ${tableName}: ${rows.length} rows processed.`);
         }
+
+        // Add default superadmin since the CSV was missing the password field
+        await client.query("INSERT INTO admin_users (email, password, name, role) VALUES ('superadmin1@samanyudu.tv', 'admin123', 'Super Admin 1', 'super_admin') ON CONFLICT (email) DO NOTHING;");
+        console.log("Default superadmin created: superadmin1@samanyudu.tv / admin123");
         console.log("✅ DB INITIALIZATION COMPLETE");
     } catch (e) {
         console.error("❌ DB Initialization Error:", e.message);
