@@ -1,15 +1,10 @@
 require('dotenv').config();
 const { Pool } = require('pg');
 
-// This Pool connects to your new PostgreSQL database on Hetzner.
-// Note: While developing locally, you can use a local Postgres database.
+// This Pool connects to your PostgreSQL database.
 const pool = new Pool({
-    host: process.env.DB_HOST,
-    port: process.env.DB_PORT || 5432,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    // ssl: { rejectUnauthorized: false } // You might need this for external connections later
+    connectionString: process.env.DATABASE_URL || `postgresql://${process.env.DB_USER}:${process.env.DB_PASSWORD}@${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_NAME}`,
+    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
 pool.on('error', (err, client) => {
