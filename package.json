@@ -1,5 +1,5 @@
 {
-      "name": "Admin Dashboard for SAMANYUDU TV",
+      "name": "samanyudu-admin-dashboard",
       "version": "0.1.0",
       "private": true,
       "dependencies": {
@@ -60,5 +60,8 @@
       "scripts": {
             "dev": "vite",
             "build": "vite build"
+      },
+      "engines": {
+            "node": "20.x"
       }
 }
