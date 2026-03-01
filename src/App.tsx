@@ -74,7 +74,6 @@ const Sidebar = ({ activeTab, setActiveTab, mobileOpen, setMobileOpen, user, onL
       { id: 'advertisements', label: 'Manage Ads', icon: Radio },
       { id: 'approvals', label: 'User Approvals', icon: FileCheck },
       { id: 'analytics', label: 'Analytics', icon: BarChart2 },
-      { id: 'app_preview', label: 'App View', icon: Smartphone },
     ] : []),
     { id: 'settings', label: 'Settings', icon: Settings },
   ];
@@ -90,7 +89,7 @@ const Sidebar = ({ activeTab, setActiveTab, mobileOpen, setMobileOpen, user, onL
       )}
 
       {/* Sidebar Container */}
-      <div className={`fixed md:static inset-y-0 left-0 z-50 w-64 bg-[#0f172a] border-r border-slate-800 transform transition-transform duration-200 ease-in-out ${mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}>
+      <div className={`fixed md:static inset-y-0 left-0 z-[120] w-56 bg-[#0f172a] border-r border-slate-800 transform transition-transform duration-200 ease-in-out ${mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}>
         <div className="flex flex-col h-full">
           <div className="p-6 border-b border-slate-800 flex justify-center">
             <img src={logoImage} alt="SAMANYUDU TV" className="h-16 object-contain" />
@@ -2230,56 +2229,57 @@ const NewsApprovalManager = ({ pendingNews, setPendingNews, setNews }: { pending
         )}
       </div>
 
-      {/* Review Modal */}
       {selectedItem && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm" onClick={() => setSelectedItem(null)}>
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
-            className="bg-slate-900 w-full max-w-2xl rounded-xl border border-slate-700 shadow-2xl overflow-hidden max-h-[90vh] flex flex-col"
+            className="bg-slate-900 w-[95%] max-w-4xl h-full md:h-auto max-h-[90vh] md:max-h-[85vh] rounded-xl border border-slate-700 shadow-2xl overflow-hidden relative flex flex-col md:flex-row mx-auto"
+            onClick={e => e.stopPropagation()}
           >
-            <div className="p-6 border-b border-slate-800 flex justify-between items-center bg-slate-800/50">
-              <h2 className="text-xl font-bold text-white">Review Submission</h2>
-              <button onClick={() => setSelectedItem(null)} className="text-slate-400 hover:text-white">
-                <X size={24} />
-              </button>
-            </div>
-
-            <div className="p-6 overflow-y-auto custom-scrollbar flex-1 space-y-6">
-              {selectedItem.imageUrl && (
-                <div className="w-full h-64 bg-slate-800 rounded-lg overflow-hidden border border-slate-700">
-                  <img src={selectedItem.imageUrl} alt={selectedItem.title} className="w-full h-full object-cover" />
+            <div className="flex-1 overflow-y-auto flex flex-col">
+              <div className="p-4 md:p-8 space-y-6">
+                <div className="flex justify-between items-center mb-6">
+                  <h2 className="text-2xl font-bold text-white leading-tight break-words">{selectedItem.title}</h2>
+                  <button onClick={() => setSelectedItem(null)} className="text-slate-400 hover:text-white p-2">
+                    <X size={24} />
+                  </button>
                 </div>
-              )}
+                {selectedItem.imageUrl && (
+                  <div className="w-full h-64 bg-slate-800 rounded-lg overflow-hidden border border-slate-700">
+                    <img src={selectedItem.imageUrl} alt={selectedItem.title} className="w-full h-full object-cover" />
+                  </div>
+                )}
 
-              <div>
-                <h3 className="text-2xl font-bold text-white mb-2">{selectedItem.title}</h3>
-                <div className="flex flex-wrap gap-2 mb-4">
-                  <span className="px-3 py-1 bg-slate-800 rounded-full text-xs text-slate-300 border border-slate-700">Category: {selectedItem.type}</span>
-                  <span className="px-3 py-1 bg-slate-800 rounded-full text-xs text-slate-300 border border-slate-700">Area: {selectedItem.area}</span>
-                  <span className="px-3 py-1 bg-blue-900/30 rounded-full text-xs text-blue-400 border border-blue-500/20">User: {selectedItem.author}</span>
-                  <span className="px-3 py-1 bg-slate-800 rounded-full text-xs text-slate-400 border border-slate-700">Time: {new Date(selectedItem.timestamp).toLocaleString()}</span>
-                </div>
+                <div>
+                  <h3 className="text-2xl font-bold text-white mb-2">{selectedItem.title}</h3>
+                  <div className="flex flex-wrap gap-2 mb-4">
+                    <span className="px-3 py-1 bg-slate-800 rounded-full text-xs text-slate-300 border border-slate-700">Category: {selectedItem.type}</span>
+                    <span className="px-3 py-1 bg-slate-800 rounded-full text-xs text-slate-300 border border-slate-700">Area: {selectedItem.area}</span>
+                    <span className="px-3 py-1 bg-blue-900/30 rounded-full text-xs text-blue-400 border border-blue-500/20">User: {selectedItem.author}</span>
+                    <span className="px-3 py-1 bg-slate-800 rounded-full text-xs text-slate-400 border border-slate-700">Time: {new Date(selectedItem.timestamp).toLocaleString()}</span>
+                  </div>
 
-                <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700">
-                  <p className="text-slate-300 leading-relaxed whitespace-pre-wrap">{selectedItem.description}</p>
+                  <div className="text-slate-300 leading-relaxed whitespace-pre-wrap font-serif break-words">
+                    {selectedItem.description}
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div className="p-6 border-t border-slate-800 bg-slate-800/50 flex justify-end gap-3">
-              <button
-                onClick={() => handleReject(selectedItem.id)}
-                className="px-6 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 font-bold rounded-lg transition-colors"
-              >
-                Reject
-              </button>
-              <button
-                onClick={() => handleApprove(selectedItem)}
-                className="px-6 py-2 bg-green-600 hover:bg-green-500 text-white font-bold rounded-lg transition-colors shadow-lg shadow-green-500/20"
-              >
-                Approve & Publish
-              </button>
+              <div className="p-6 border-t border-slate-800 bg-slate-800/30 flex items-center gap-4 flex-wrap md:flex-nowrap">
+                <button
+                  onClick={() => handleReject(selectedItem.id)}
+                  className="px-6 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 font-bold rounded-lg transition-colors"
+                >
+                  Reject
+                </button>
+                <button
+                  onClick={() => handleApprove(selectedItem)}
+                  className="px-6 py-2 bg-green-600 hover:bg-green-500 text-white font-bold rounded-lg transition-colors shadow-lg shadow-green-500/20"
+                >
+                  Approve & Publish
+                </button>
+              </div>
             </div>
           </motion.div>
         </div>
@@ -2288,231 +2288,6 @@ const NewsApprovalManager = ({ pendingNews, setPendingNews, setNews }: { pending
   );
 };
 
-// --- App Preview Component ---
-
-// --- REUSABLE SHORT CARD FOR APP PREVIEW ---
-const ShortCard = ({ short, onViewItem }: { short: ShortItem, onViewItem: (item: ShortItem) => void }) => {
-  const { liked, saved, likeCount, handleLike, handleShare } = useItemInteractions(short);
-
-  return (
-    <div
-      onClick={() => onViewItem(short)}
-      className="shrink-0 w-48 aspect-[9/16] bg-slate-800 rounded-lg overflow-hidden relative border border-slate-700 shadow-md group cursor-pointer hover:border-yellow-500/50 transition-colors"
-    >
-      <div className="absolute inset-0 bg-slate-700 flex items-center justify-center group-hover:bg-slate-700/50 transition-colors">
-        {short.videoUrl ? (
-          <video
-            src={short.videoUrl}
-            className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity"
-            muted
-            playsInline
-            onMouseOver={e => e.currentTarget.play()}
-            onMouseOut={e => {
-              e.currentTarget.pause();
-              e.currentTarget.currentTime = 0;
-            }}
-          />
-        ) : (
-          <Video size={32} className="text-slate-500 group-hover:text-yellow-500 transition-colors" />
-        )}
-      </div>
-      <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent p-3 pt-10 flex flex-col justify-end">
-        <p className="text-white text-sm font-medium line-clamp-2 leading-tight mb-2">{short.title}</p>
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-slate-400">{short.duration}s</span>
-          <div className="flex items-center gap-1">
-            <button
-              className={`p-1.5 rounded-full backdrop-blur-sm transition-colors ${liked ? 'bg-red-500 text-white' : 'bg-white/10 text-white hover:bg-white/20'}`}
-              onClick={handleLike}
-            >
-              <Heart size={14} fill={liked ? "currentColor" : "none"} />
-            </button>
-            <span className="text-[10px] text-white font-medium">{likeCount}</span>
-          </div>
-          <button
-            className="p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors backdrop-blur-sm"
-            onClick={handleShare}
-          >
-            <Share2 size={14} />
-          </button>
-        </div>
-      </div>
-      {/* Saved Indicator */}
-      {saved && (
-        <div className="absolute top-2 right-2 bg-yellow-500 text-slate-900 p-1 rounded-full shadow-lg z-10">
-          <Bookmark size={12} fill="currentColor" />
-        </div>
-      )}
-    </div>
-  );
-};
-
-const AppPreview = ({ news, shorts, onViewItem }: { news: NewsItem[], shorts: ShortItem[], onViewItem: (item: NewsItem | ShortItem) => void }) => {
-  const [subTab, setSubTab] = useState<'home' | 'categories' | 'saved'>('home');
-
-  // Group news by type for the home view
-  const groupedNews = news.reduce((acc, item) => {
-    if (item.status === 'published' || !item.status) { // Include only published or legacy items
-      if (!acc[item.type]) acc[item.type] = [];
-      acc[item.type].push(item);
-    }
-    return acc;
-  }, {} as Record<string, NewsItem[]>);
-
-  // Get all unique categories available
-  const categories = Array.from(new Set(news.map(n => n.type)));
-
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold text-white">User App Content</h2>
-        <div className="flex bg-slate-800 p-1 rounded-lg border border-slate-700">
-          <button
-            onClick={() => setSubTab('home')}
-            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${subTab === 'home' ? 'bg-yellow-500 text-slate-900 shadow' : 'text-slate-400 hover:text-white'}`}
-          >
-            Home
-          </button>
-          <button
-            onClick={() => setSubTab('categories')}
-            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${subTab === 'categories' ? 'bg-yellow-500 text-slate-900 shadow' : 'text-slate-400 hover:text-white'}`}
-          >
-            Categories
-          </button>
-          <button
-            onClick={() => setSubTab('saved')}
-            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${subTab === 'saved' ? 'bg-yellow-500 text-slate-900 shadow' : 'text-slate-400 hover:text-white'}`}
-          >
-            Saved
-          </button>
-        </div>
-      </div>
-
-      <div className="bg-slate-900/50 rounded-xl border border-slate-800 p-6 min-h-[600px]">
-        {subTab === 'home' ? (
-          <div className="space-y-6">
-            {/* App Header: Admin, Weather, Notifications */}
-            <div className="flex items-center justify-between bg-[#048ABF] p-4 rounded-xl border border-slate-700 backdrop-blur-sm shadow-lg shadow-blue-900/20">
-              {/* Left: Admin Profile */}
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 bg-gradient-to-br from-yellow-400 to-yellow-600 rounded-full flex items-center justify-center text-slate-900 shadow-lg">
-                  <UserCircle size={24} />
-                </div>
-                <div>
-                  <p className="text-white text-sm font-bold leading-none">Admin</p>
-                  <span className="text-[10px] text-yellow-500 font-medium bg-yellow-500/10 px-1.5 py-0.5 rounded border border-yellow-500/20 mt-1 inline-block">VERIFIED</span>
-                </div>
-              </div>
-
-              {/* Center: Weather Widget */}
-              <div className="flex flex-col items-center">
-                <div className="flex items-center gap-2 text-white">
-                  <CloudSun size={24} className="text-yellow-400" />
-                  <span className="font-bold text-xl">28°C</span>
-                </div>
-                <p className="text-xs text-slate-400 font-medium">Vijayawada</p>
-              </div>
-
-              {/* Right: Notifications */}
-              <button className="relative p-2.5 bg-slate-700/50 hover:bg-slate-700 text-white rounded-full transition-all hover:scale-105 active:scale-95 border border-slate-600">
-                <Bell size={20} />
-                <span className="absolute top-0 right-0 w-3 h-3 bg-red-500 border-2 border-slate-800 rounded-full animate-pulse"></span>
-              </button>
-            </div>
-
-            {/* Breaking News Ticker */}
-            {news.some(n => n.isBreaking) && (
-              <div className="bg-red-600 text-white px-4 py-2 text-sm font-bold flex items-center gap-4 overflow-hidden rounded-lg shadow-lg shadow-red-900/20">
-                <span className="bg-white text-red-600 px-2 py-0.5 text-xs rounded uppercase tracking-wider animate-pulse font-bold shrink-0">Breaking News</span>
-                <div className="animate-marquee whitespace-nowrap overflow-hidden flex items-center gap-4">
-                  {news.filter(n => n.isBreaking).map((n, index) => (
-                    <span
-                      key={n.id}
-                      onClick={() => onViewItem(n)}
-                      className="cursor-pointer hover:underline hover:text-white/90 transition-colors inline-flex items-center"
-                    >
-                      {n.title}
-                      {index < news.filter(n => n.isBreaking).length - 1 && <span className="mx-4 text-red-200 opacity-50">•</span>}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Shorts Section */}
-            <div>
-              <h3 className="text-white font-bold text-xl mb-4 flex items-center gap-2 border-b border-slate-800 pb-2">
-                <Film size={20} className="text-yellow-500" /> Shorts & Reels
-              </h3>
-              <div className="flex gap-4 overflow-x-auto pb-4 custom-scrollbar">
-                {shorts.map(short => (
-                  <ShortCard key={short.id} short={short} onViewItem={onViewItem} />
-                ))}
-                {shorts.length === 0 && (
-                  <div className="text-slate-500 italic px-4 py-8 w-full text-center bg-slate-800/30 rounded-lg border border-dashed border-slate-800">
-                    No shorts available currently.
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* News Categories */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-              {Object.entries(groupedNews).map(([category, items]) => (
-                <div key={category} className="space-y-4">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                    <h3 className="text-white font-bold text-xl capitalize border-l-4 border-yellow-500 pl-3">{category}</h3>
-                    <button className="text-sm text-yellow-500 font-medium hover:text-yellow-400">View All</button>
-                  </div>
-                  <div className="space-y-4">
-                    {items.slice(0, 3).map(item => (
-                      <div key={item.id} onClick={() => onViewItem(item)} className="bg-slate-800 rounded-lg overflow-hidden border border-slate-700 shadow-sm flex h-28 hover:border-slate-600 transition-colors cursor-pointer">
-                        <div className="w-32 h-full bg-slate-700 relative shrink-0">
-                          {item.imageUrl && <img src={item.imageUrl} className="w-full h-full object-cover" alt="" />}
-                        </div>
-                        <div className="p-3 flex flex-col justify-between flex-1">
-                          <div>
-                            <h4 className="text-white font-semibold text-base line-clamp-2 leading-tight mb-1">{item.title}</h4>
-                            <p className="text-slate-400 text-xs line-clamp-1">{item.description}</p>
-                          </div>
-                          <div className="flex items-center gap-2 text-xs text-slate-500 mt-2">
-                            <span className="bg-slate-700/50 px-1.5 py-0.5 rounded">{item.area}</span>
-                            <span>•</span>
-                            <span>{new Date(item.timestamp).toLocaleDateString()}</span>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
-            {categories.map(cat => (
-              <div key={cat} className="aspect-square bg-slate-800 border border-slate-700 rounded-xl flex flex-col items-center justify-center gap-3 hover:border-yellow-500/50 hover:bg-slate-800/80 transition-all cursor-pointer group shadow-lg">
-                <div className="w-12 h-12 rounded-full bg-slate-900 flex items-center justify-center group-hover:bg-yellow-500/10 transition-colors">
-                  <Newspaper className="text-slate-400 group-hover:text-yellow-500" size={24} />
-                </div>
-                <div className="text-center">
-                  <span className="block text-white font-bold text-base">{cat}</span>
-                  <span className="text-xs text-slate-500">{groupedNews[cat]?.length || 0} articles</span>
-                </div>
-              </div>
-            ))}
-            {categories.length === 0 && (
-              <div className="col-span-full text-center text-slate-500 py-20 flex flex-col items-center">
-                <Filter size={48} className="opacity-20 mb-4" />
-                <p>No categories found.</p>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
 
 // --- Shorts Manager ---
 
@@ -2896,7 +2671,7 @@ const AdvertisementsManager = ({
 }) => {
   const [showForm, setShowForm] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [formData, setFormData] = useState({ mediaUrl: '', intervalMinutes: 15, clickUrl: '', isActive: true });
+  const [formData, setFormData] = useState({ mediaUrl: '', intervalMinutes: 15, displayInterval: 4, clickUrl: '', isActive: true });
   const [file, setFile] = useState<File | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -2916,11 +2691,12 @@ const AdvertisementsManager = ({
       await onAdd({
         mediaUrl: finalMediaUrl,
         intervalMinutes: formData.intervalMinutes,
+        displayInterval: formData.displayInterval,
         clickUrl: formData.clickUrl,
         isActive: formData.isActive
       });
       setShowForm(false);
-      setFormData({ mediaUrl: '', intervalMinutes: 15, clickUrl: '', isActive: true });
+      setFormData({ mediaUrl: '', intervalMinutes: 15, displayInterval: 4, clickUrl: '', isActive: true });
       setFile(null);
       toast.success('Advertisement added successfully');
     } catch (error) {
@@ -2956,12 +2732,23 @@ const AdvertisementsManager = ({
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-slate-300 mb-1">Interval (Minutes)</label>
+              <label className="block text-sm font-medium text-slate-300 mb-1">Time Interval (Mins)</label>
               <input
                 type="number"
                 min="1"
                 value={formData.intervalMinutes}
                 onChange={(e) => setFormData(p => ({ ...p, intervalMinutes: parseInt(e.target.value) || 15 }))}
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-white outline-none focus:border-yellow-500 transition-colors"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-300 mb-1">Item Interval (News/Shorts)</label>
+              <input
+                type="number"
+                min="1"
+                value={formData.displayInterval}
+                onChange={(e) => setFormData(p => ({ ...p, displayInterval: parseInt(e.target.value) || 4 }))}
                 className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-white outline-none focus:border-yellow-500 transition-colors"
                 required
               />
@@ -3007,24 +2794,42 @@ const AdvertisementsManager = ({
             </div>
             <div className="p-3 space-y-2">
               <div className="flex justify-between items-center">
-                <span className="text-[10px] text-slate-400 flex items-center gap-2">
-                  Int: {ad.intervalMinutes}m
-                  <button
-                    onClick={() => {
-                      const newVal = window.prompt('Enter new interval (minutes):', ad.intervalMinutes.toString());
-                      if (newVal) {
-                        const parsed = parseInt(newVal, 10);
-                        if (!isNaN(parsed) && parsed > 0) {
-                          onUpdate(ad.id, { intervalMinutes: parsed });
+                <div className="flex flex-col gap-1">
+                  <span className="text-[10px] text-slate-400 flex items-center gap-1">
+                    Time: {ad.intervalMinutes}m
+                    <button
+                      onClick={() => {
+                        const newVal = window.prompt('Enter new time interval (minutes):', ad.intervalMinutes.toString());
+                        if (newVal) {
+                          const parsed = parseInt(newVal, 10);
+                          if (!isNaN(parsed) && parsed > 0) {
+                            onUpdate(ad.id, { intervalMinutes: parsed });
+                          }
                         }
-                      }
-                    }}
-                    className="text-yellow-500 hover:text-yellow-400 p-1"
-                    title="Edit Interval"
-                  >
-                    <Edit size={12} />
-                  </button>
-                </span>
+                      }}
+                      className="text-yellow-500 hover:text-yellow-400"
+                    >
+                      <Edit size={10} />
+                    </button>
+                  </span>
+                  <span className="text-[10px] text-slate-400 flex items-center gap-1">
+                    Items: {ad.displayInterval || 4}
+                    <button
+                      onClick={() => {
+                        const newVal = window.prompt('Enter new item interval (e.g. after 4 items):', (ad.displayInterval || 4).toString());
+                        if (newVal) {
+                          const parsed = parseInt(newVal, 10);
+                          if (!isNaN(parsed) && parsed > 0) {
+                            onUpdate(ad.id, { displayInterval: parsed });
+                          }
+                        }
+                      }}
+                      className="text-yellow-500 hover:text-yellow-400"
+                    >
+                      <Edit size={10} />
+                    </button>
+                  </span>
+                </div>
                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${ad.isActive ? 'bg-green-500/20 text-green-500' : 'bg-red-500/20 text-red-500'}`}>
                   {ad.isActive ? 'Active' : 'Paused'}
                 </span>
@@ -3337,9 +3142,6 @@ export default function App() {
               <NewsManager news={news} setNews={setNews} onViewItem={setViewingMedia} user={adminUser} />
             )}
 
-            {activeTab === 'app_preview' && adminUser.role === 'super_admin' && (
-              <AppPreview news={news} shorts={shorts} onViewItem={setViewingMedia} />
-            )}
 
             {activeTab === 'approvals' && adminUser.role === 'super_admin' && (
               <NewsApprovalManager pendingNews={pendingNews} setPendingNews={setPendingNews} setNews={setNews} />
@@ -3376,6 +3178,9 @@ export default function App() {
           </div>
         </main>
       </div>
+      {viewingMedia && (
+        <MediaPlayer item={viewingMedia} onClose={() => setViewingMedia(null)} />
+      )}
     </div>
   );
 }

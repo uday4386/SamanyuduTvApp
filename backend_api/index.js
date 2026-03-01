@@ -39,7 +39,25 @@ const transporter = nodemailer.createTransport({
 const emailOtpStore = new Map();
 
 // Middleware
-app.use(cors());
+const allowedOrigins = [
+    'http://localhost:5173',
+    'http://localhost:5000',
+    'http://192.168.29.208:5000',
+    'http://192.168.29.208:5173',
+    process.env.ADMIN_URL,
+    process.env.MOBILE_WEB_URL
+].filter(Boolean);
+
+app.use(cors({
+    origin: function (origin, callback) {
+        if (!origin || allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true
+}));
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
@@ -117,16 +135,23 @@ app.post('/api/auth/send-otp', async (req, res) => {
     }
 });
 
-app.post('/api/auth/verify-otp', async (req, res) => {
+app.post('/api/auth/register-mobile', async (req, res) => {
     try {
-        let { phone, otp } = req.body;
+        let { firstName, lastName, phone, otp, password } = req.body;
+
+        if (!firstName || !lastName || !phone || !otp || !password) {
+            return res.status(400).json({ error: 'All fields are required' });
+        }
+
         phone = phone.replace(/\D/g, '');
         if (phone.length === 12 && phone.startsWith('91')) {
             phone = phone.substring(2);
         }
 
-        if (!phone || !otp) {
-            return res.status(400).json({ error: 'Phone and OTP are required' });
+        // Check if user already exists
+        const { rows: existingUser } = await db.query('SELECT * FROM users WHERE phone = $1', [phone]);
+        if (existingUser.length > 0) {
+            return res.status(400).json({ error: 'Phone number already registered' });
         }
 
         // Authkey API URL for verifying OTP
@@ -137,30 +162,50 @@ app.post('/api/auth/verify-otp', async (req, res) => {
 
         console.log("AuthKey Verify Response:", data);
 
-        // NOTE: AuthKey often handles the OTP matching internally and returns success.
-        // Assuming success structure based on typical Indian SMS providers:
         if (data.Message && (data.Message.toLowerCase().includes('success') || data.Message.toLowerCase().includes('verified'))) {
-            // Check if user exists in our DB, if not, create them
-            const { rows } = await db.query('SELECT * FROM users WHERE phone = $1', [phone]);
-            let user;
-            if (rows.length === 0) {
-                const insertRes = await db.query('INSERT INTO users (phone, name) VALUES ($1, $2) RETURNING *', [phone, 'New User']);
-                user = insertRes.rows[0];
-            } else {
-                user = rows[0];
-            }
+            // Insert new user
+            const query = 'INSERT INTO users (first_name, last_name, phone, password, name) VALUES ($1, $2, $3, $4, $5) RETURNING *';
+            const result = await db.query(query, [firstName, lastName, phone, password, `${firstName} ${lastName}`.trim()]);
+            const user = result.rows[0];
 
             return res.json({
                 success: true,
-                message: 'OTP verified successfully',
-                user: { id: user.id, phone: user.phone, name: user.name }
+                message: 'User registered successfully',
+                user: { id: user.id, phone: user.phone, name: user.name || `${user.first_name} ${user.last_name}`.trim() }
             });
         } else {
-            return res.status(400).json({ error: 'Invalid OTP' });
+            return res.status(400).json({ error: 'Invalid or expired OTP' });
         }
     } catch (err) {
-        console.error("Error verifying OTP:", err);
-        res.status(500).json({ error: 'Internal Server Error verifying OTP' });
+        console.error("Error registering via mobile:", err);
+        res.status(500).json({ error: 'Internal Server Error registering user' });
+    }
+});
+
+// Login with Mobile and Password
+app.post('/api/auth/login-mobile', async (req, res) => {
+    try {
+        let { phone, password } = req.body;
+        if (!phone || !password) return res.status(400).json({ error: 'Phone number and password are required' });
+
+        phone = phone.replace(/\D/g, '');
+        if (phone.length === 12 && phone.startsWith('91')) {
+            phone = phone.substring(2);
+        }
+
+        const { rows } = await db.query('SELECT * FROM users WHERE phone = $1 AND password = $2', [phone, password]);
+        if (rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid phone number or password' });
+        }
+
+        const user = rows[0];
+        res.json({
+            success: true,
+            user: { id: user.id, phone: user.phone, name: user.name || `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'User' }
+        });
+    } catch (err) {
+        console.error("Error logging in mobile:", err);
+        res.status(500).json({ error: 'Internal Server Error' });
     }
 });
 
@@ -253,6 +298,39 @@ app.post('/api/auth/login-email', async (req, res) => {
     } catch (err) {
         console.error("Error logging in:", err);
         res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+// Update Profile API
+app.put('/api/user/:id/profile', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { name, phone, oldName } = req.body;
+
+        // Split name fallback just in case we still rely on first/last
+        const first_name = name.split(' ')[0] || '';
+        const last_name = name.substring(first_name.length).trim() || '';
+
+        // Update user
+        const { rows } = await db.query(
+            'UPDATE users SET name = $1, first_name = $2, last_name = $3, phone = $4 WHERE id = $5 RETURNING *',
+            [name, first_name, last_name, phone, id]
+        );
+
+        if (rows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+        // Update comments by this user
+        await db.query('UPDATE shorts_comments SET user_name = $1 WHERE user_id = $2', [name, id]);
+
+        // Update news author
+        if (oldName && oldName.trim() !== '') {
+            await db.query('UPDATE news SET author = $1 WHERE author = $2', [name, oldName]);
+        }
+
+        res.json({ success: true, user: rows[0] });
+    } catch (error) {
+        console.error('Error updating profile:', error);
+        res.status(500).json({ error: 'Failed to update user profile' });
     }
 });
 
@@ -471,14 +549,19 @@ app.get('/api/news', async (req, res) => {
 
 app.post('/api/news', async (req, res) => {
     try {
-        const { title, description, category, img_url, video_url, location, is_breaking, live_link, status, author, area, type } = req.body;
+        const { title, description, category, img_url, image_url, video_url, location, is_breaking, live_link, status, author, area, type } = req.body;
+
+        // Normalize fields
+        const finalImageUrl = img_url || image_url;
+        const finalArea = area || location;
+        const finalType = type || category;
         const query = `
       INSERT INTO news(title, description, area, type, image_url, video_url, is_breaking, live_link, status, author)
       VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING *;
         `;
         // We map category to type or area depending on the frontend payload, using area/type here as named in schema
-        const values = [title, description, area || location, type || category, img_url, video_url, is_breaking || false, live_link, status || 'published', author || 'Admin'];
+        const values = [title, description, finalArea, finalType, finalImageUrl, video_url, is_breaking || false, live_link, status || 'published', author || 'Admin'];
         const { rows } = await db.query(query, values);
         res.status(201).json(rows[0]);
     } catch (error) {
@@ -546,13 +629,14 @@ app.get('/api/shorts', async (req, res) => {
 
 app.post('/api/shorts', async (req, res) => {
     try {
-        const { title, video_url, duration, area, author } = req.body;
+        const { title, video_url, videoUrl, duration, area, author } = req.body;
+        const finalVideoUrl = video_url || videoUrl;
         const query = `
       INSERT INTO shorts(title, video_url, duration, area, author)
         VALUES($1, $2, $3, $4, $5)
         RETURNING *;
         `;
-        const { rows } = await db.query(query, [title, video_url, duration, area, author]);
+        const { rows } = await db.query(query, [title, finalVideoUrl, duration, area || 'General', author || 'Admin']);
         res.status(201).json(rows[0]);
     } catch (error) {
         console.error('Error inserting short:', error);
@@ -607,13 +691,13 @@ app.get('/api/advertisements', async (req, res) => {
 
 app.post('/api/advertisements', async (req, res) => {
     try {
-        const { media_url, interval_minutes, click_url, is_active } = req.body;
+        const { media_url, interval_minutes, display_interval, click_url, is_active } = req.body;
         const query = `
-      INSERT INTO advertisements(media_url, interval_minutes, click_url, is_active)
-        VALUES($1, $2, $3, $4)
+      INSERT INTO advertisements(media_url, interval_minutes, display_interval, click_url, is_active)
+        VALUES($1, $2, $3, $4, $5)
         RETURNING *;
         `;
-        const { rows } = await db.query(query, [media_url, interval_minutes, click_url, is_active]);
+        const { rows } = await db.query(query, [media_url, interval_minutes, display_interval || 4, click_url, is_active]);
         res.status(201).json(rows[0]);
     } catch (error) {
         console.error('Error inserting ad:', error);
@@ -656,6 +740,7 @@ app.delete('/api/advertisements/:id', async (req, res) => {
 // ==========================================
 // MIGRATED ROUTES: COMMENTS & LIKES
 // ==========================================
+// --- Shorts Comments ---
 app.get('/api/shorts/:id/comments', async (req, res) => {
     try {
         const { id } = req.params;
@@ -663,7 +748,7 @@ app.get('/api/shorts/:id/comments', async (req, res) => {
         const { rows } = await db.query(query, [id]);
         res.json(rows);
     } catch (error) {
-        console.error('Error fetching comments:', error);
+        console.error('Error fetching short comments:', error);
         res.status(500).json({ error: 'Internal Server Error' });
     }
 });
@@ -677,14 +762,71 @@ app.post('/api/shorts/comments', async (req, res) => {
         RETURNING *;
         `;
         const { rows } = await db.query(query, [short_id, user_id, user_name, comment_text]);
-
-        // Update comment count
         await db.query('UPDATE shorts SET comments_count = comments_count + 1 WHERE id = $1', [short_id]);
-
         res.status(201).json(rows[0]);
     } catch (error) {
-        console.error('Error inserting comment:', error);
+        console.error('Error inserting short comment:', error);
         res.status(500).json({ error: 'Failed to add comment' });
+    }
+});
+
+app.delete('/api/shorts/comments/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { rows } = await db.query('DELETE FROM shorts_comments WHERE id = $1 RETURNING short_id', [id]);
+        if (rows.length > 0) {
+            const shortId = rows[0].short_id;
+            await db.query('UPDATE shorts SET comments_count = GREATEST(comments_count - 1, 0) WHERE id = $1', [shortId]);
+        }
+        res.status(204).send();
+    } catch (error) {
+        console.error('Error deleting short comment:', error);
+        res.status(500).json({ error: 'Failed to delete comment' });
+    }
+});
+
+// --- News Comments ---
+app.get('/api/news/:id/comments', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const query = 'SELECT * FROM news_comments WHERE news_id = $1 ORDER BY created_at DESC';
+        const { rows } = await db.query(query, [id]);
+        res.json(rows);
+    } catch (error) {
+        console.error('Error fetching news comments:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+app.post('/api/news/comments', async (req, res) => {
+    try {
+        const { news_id, user_id, user_name, comment_text } = req.body;
+        const query = `
+      INSERT INTO news_comments(news_id, user_id, user_name, comment_text)
+        VALUES($1, $2, $3, $4)
+        RETURNING *;
+        `;
+        const { rows } = await db.query(query, [news_id, user_id, user_name, comment_text]);
+        await db.query('UPDATE news SET comments_count = comments_count + 1 WHERE id = $1', [news_id]);
+        res.status(201).json(rows[0]);
+    } catch (error) {
+        console.error('Error inserting news comment:', error);
+        res.status(500).json({ error: 'Failed to add comment' });
+    }
+});
+
+app.delete('/api/news/comments/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { rows } = await db.query('DELETE FROM news_comments WHERE id = $1 RETURNING news_id', [id]);
+        if (rows.length > 0) {
+            const newsId = rows[0].news_id;
+            await db.query('UPDATE news SET comments_count = GREATEST(comments_count - 1, 0) WHERE id = $1', [newsId]);
+        }
+        res.status(204).send();
+    } catch (error) {
+        console.error('Error deleting news comment:', error);
+        res.status(500).json({ error: 'Failed to delete comment' });
     }
 });
 
@@ -702,11 +844,31 @@ app.post('/api/news/:id/like', async (req, res) => {
             await db.query('SELECT decrement_news_likes($1)', [id]);
         }
 
-        // Return updated like count
         const { rows } = await db.query('SELECT likes FROM news WHERE id = $1', [id]);
         res.json({ likes: rows[0].likes });
     } catch (error) {
-        console.error('Error modifying likes:', error);
+        console.error('Error modifying news likes:', error);
+        res.status(500).json({ error: 'Failed to process like' });
+    }
+});
+
+app.post('/api/shorts/:id/like', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { user_id, action } = req.body;
+
+        if (action === 'like') {
+            await db.query('INSERT INTO shorts_likes (short_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [id, user_id]);
+            await db.query('SELECT increment_shorts_likes($1)', [id]);
+        } else {
+            await db.query('DELETE FROM shorts_likes WHERE short_id = $1 AND user_id = $2', [id, user_id]);
+            await db.query('SELECT decrement_shorts_likes($1)', [id]);
+        }
+
+        const { rows } = await db.query('SELECT likes FROM shorts WHERE id = $1', [id]);
+        res.json({ likes: rows[0] ? rows[0].likes : 0 });
+    } catch (error) {
+        console.error('Error modifying short likes:', error);
         res.status(500).json({ error: 'Failed to process like' });
     }
 });
@@ -714,6 +876,42 @@ app.post('/api/news/:id/like', async (req, res) => {
 // ==========================================
 // MIGRATED ROUTES: STORAGE
 // ==========================================
+app.get('/api/user/:id/stats', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // 1. Get comments count from shorts_comments
+        const commentsResult = await db.query('SELECT COUNT(*) as count FROM shorts_comments WHERE user_id = $1', [id]);
+        const commentsCount = parseInt(commentsResult.rows[0].count, 10) || 0;
+
+        // 2. Notifications count: For now, return the number of news items added in the last 24 hours as available notifications.
+        const newsResult = await db.query("SELECT COUNT(*) as count FROM news WHERE created_at >= NOW() - INTERVAL '24 HOURS'");
+        const notificationsCount = parseInt(newsResult.rows[0].count, 10) || 0;
+
+        res.json({ commentsCount, notificationsCount });
+    } catch (error) {
+        console.error('Error fetching user stats:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+app.get('/api/user/:id/likes', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const newsLikes = await db.query('SELECT news_id FROM news_likes WHERE user_id = $1', [id]);
+        const shortsLikes = await db.query('SELECT short_id FROM shorts_likes WHERE user_id = $1', [id]);
+
+        res.json({
+            news: newsLikes.rows.map(row => row.news_id),
+            shorts: shortsLikes.rows.map(row => row.short_id)
+        });
+    } catch (error) {
+        console.error('Error fetching user likes:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
 app.post('/api/upload', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
@@ -721,31 +919,111 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
     const fileName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${fileExt}`;
 
     try {
-        const uploadParams = {
-            Bucket: process.env.R2_BUCKET_NAME,
-            Key: fileName,
-            Body: req.file.buffer,
-            ContentType: req.file.mimetype,
-        };
-
-        await S3.send(new PutObjectCommand(uploadParams));
-
-        // Save locally as well for immediate access if DNS/R2 public access is not set up
+        // 1. Always save locally first for reliability
         const localPath = path.join(__dirname, 'uploads', fileName);
         fs.writeFileSync(localPath, req.file.buffer);
+        console.log(`[Upload] Saved locally: ${fileName}`);
 
-        // Preference: Use localhost for development if R2_PUBLIC_DOMAIN is not working
-        // For production, the user should ensure R2_PUBLIC_DOMAIN is correct.
-        const host = process.env.LOCAL_IP || 'localhost';
-        const publicUrl = useLocal
-            ? `http://${host}:${port}/uploads/${fileName}`
-            : `https://${process.env.R2_PUBLIC_DOMAIN}/${fileName}`;
+        // 2. Determine the public URL
+        // Use the host from the request headers to ensure the client can reach it back
+        // This solves the 'localhost' vs '172.16.x.x' issue automatically
+        const protocol = req.protocol;
+        const host = req.get('host'); // e.g. 'localhost:5000' or '172.16.25.5:5000'
 
-        console.log(`[R2] Uploaded to R2. [Local] Saved as ${fileName}. URL: ${publicUrl}`);
+        let publicUrl;
+        if (useLocal) {
+            publicUrl = `${protocol}://${host}/uploads/${fileName}`;
+
+            // Try R2 upload as a backup (non-blocking in local mode)
+            const uploadParams = {
+                Bucket: process.env.R2_BUCKET_NAME,
+                Key: fileName,
+                Body: req.file.buffer,
+                ContentType: req.file.mimetype,
+            };
+            S3.send(new PutObjectCommand(uploadParams))
+                .then(() => console.log(`[R2] Backup upload successful: ${fileName}`))
+                .catch(err => console.error(`[R2] Backup upload failed (ignoring in local mode):`, err.message));
+        } else {
+            // Production mode: R2 is mandatory
+            const uploadParams = {
+                Bucket: process.env.R2_BUCKET_NAME,
+                Key: fileName,
+                Body: req.file.buffer,
+                ContentType: req.file.mimetype,
+            };
+            await S3.send(new PutObjectCommand(uploadParams));
+
+            if (process.env.R2_PUBLIC_DOMAIN) {
+                publicUrl = `https://${process.env.R2_PUBLIC_DOMAIN}/${fileName}`;
+            } else {
+                // Fallback to local if R2 domain is missing
+                publicUrl = `${protocol}://${host}/uploads/${fileName}`;
+            }
+        }
+
+        console.log(`[Upload] Completed. URL: ${publicUrl}`);
         res.json({ url: publicUrl });
     } catch (err) {
-        console.error('Error uploading to R2:', err);
-        res.status(500).json({ error: 'File upload failed' });
+        console.error('Error in upload process:', err);
+        res.status(500).json({ error: 'File processing failed', details: err.message });
+    }
+});
+
+// ==========================================
+// SAVED ITEMS
+// ==========================================
+app.get('/api/user/:id/saved', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { rows } = await db.query('SELECT item_id, item_type FROM saved_items WHERE user_id = $1', [id]);
+
+        const news = rows.filter(r => r.item_type === 'news').map(r => r.item_id);
+        const shorts = rows.filter(r => r.item_type === 'shorts').map(r => r.item_id);
+
+        res.json({ news, shorts });
+    } catch (error) {
+        console.error('Error fetching saved items:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+app.post('/api/user/:id/save', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { item_id, item_type, action } = req.body; // action: 'save' or 'unsave'
+
+        if (action === 'save') {
+            await db.query('INSERT INTO saved_items (user_id, item_id, item_type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [id, item_id, item_type || 'news']);
+        } else {
+            await db.query('DELETE FROM saved_items WHERE user_id = $1 AND item_id = $2', [id, item_id]);
+        }
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error modifying saved items:', error);
+        res.status(500).json({ error: 'Failed to process save' });
+    }
+});
+
+app.post('/api/user/:id/sync-saved', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { news, shorts } = req.body; // Arrays of IDs
+
+        if (news && Array.isArray(news)) {
+            for (const itemId of news) {
+                await db.query('INSERT INTO saved_items (user_id, item_id, item_type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [id, itemId, 'news']);
+            }
+        }
+        if (shorts && Array.isArray(shorts)) {
+            for (const itemId of shorts) {
+                await db.query('INSERT INTO saved_items (user_id, item_id, item_type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [id, itemId, 'shorts']);
+            }
+        }
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Error syncing saved items:', error);
+        res.status(510).json({ error: 'Failed to sync saved items' });
     }
 });
 

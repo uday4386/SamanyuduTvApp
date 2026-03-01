@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS advertisements (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     media_url VARCHAR NOT NULL,
     interval_minutes INT,
+    display_interval INT DEFAULT 4,
     click_url VARCHAR,
     is_active BOOLEAN DEFAULT false,
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS news (
     status VARCHAR DEFAULT 'published',
     author VARCHAR,
     likes INT DEFAULT 0,
+    comments_count INT DEFAULT 0,
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -53,6 +55,15 @@ CREATE TABLE IF NOT EXISTS news_likes (
     user_id VARCHAR NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (news_id, user_id)
+);
+-- Table: news_comments
+CREATE TABLE IF NOT EXISTS news_comments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    news_id UUID REFERENCES news(id) ON DELETE CASCADE,
+    user_id VARCHAR,
+    user_name VARCHAR,
+    comment_text TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 -- Table: shorts
 CREATE TABLE IF NOT EXISTS shorts (

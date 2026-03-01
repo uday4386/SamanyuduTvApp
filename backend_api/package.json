@@ -24,6 +24,7 @@
     "nodemailer": "^8.0.1",
     "pg": "^8.18.0",
     "puppeteer": "^24.37.5",
-    "resend": "^6.9.2"
+    "resend": "^6.9.2",
+    "socket.io": "^4.8.3"
   }
 }

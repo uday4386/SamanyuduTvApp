@@ -15,16 +15,25 @@ const orderedTables = [
 ];
 
 async function initialize() {
-    console.log("Attempting to initialize database on Render...");
-    if (!process.env.DATABASE_URL) {
-        console.log("No DATABASE_URL found, skipping.");
-        return;
+    console.log("Attempting to initialize database...");
+
+    let connectionConfig;
+    if (process.env.DATABASE_URL) {
+        connectionConfig = {
+            connectionString: process.env.DATABASE_URL,
+            ssl: { rejectUnauthorized: false }
+        };
+    } else {
+        connectionConfig = {
+            host: process.env.DB_HOST || 'localhost',
+            port: process.env.DB_PORT || 5432,
+            user: process.env.DB_USER || 'postgres',
+            password: process.env.DB_PASSWORD || 'admin123',
+            database: process.env.DB_NAME || 'samanyudu'
+        };
     }
 
-    const client = new Client({
-        connectionString: process.env.DATABASE_URL,
-        ssl: { rejectUnauthorized: false }
-    });
+    const client = new Client(connectionConfig);
 
     try {
         await client.connect();
@@ -75,3 +84,7 @@ async function initialize() {
 }
 
 module.exports = { initialize };
+
+if (require.main === module) {
+    initialize();
+}

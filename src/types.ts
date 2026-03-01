@@ -1,4 +1,4 @@
-export type NewsType = 'Political' | 'Accident' | 'Education' | 'Crime' | 'Weather' | 'Sports' | 'Business' | 'Social' | 'Others';
+export type NewsType = 'Political' | 'Accident' | 'Education' | 'Crime' | 'Weather' | 'Sports' | 'Business' | 'Social' | 'Classifieds' | 'Jobs' | 'Real Estate' | 'Others';
 
 export interface NewsItem {
     id: string;
@@ -13,7 +13,8 @@ export interface NewsItem {
     timestamp: string;
     author?: string;
     status?: 'published' | 'pending' | 'rejected';
-    likes?: number; // Optional until DB is updated
+    likes?: number;
+    commentsCount?: number;
 }
 
 export interface ShortItem {
@@ -22,13 +23,17 @@ export interface ShortItem {
     videoUrl: string; // DB: video_url
     duration: number;
     timestamp: string;
-    likes?: number; // Optional until DB is updated
+    likes?: number;
+    commentsCount?: number;
+    area?: string;
+    author?: string;
 }
 
 export interface Advertisement {
     id: string;
     mediaUrl: string; // DB: media_url
     intervalMinutes: number; // DB: interval_minutes
+    displayInterval?: number; // DB: display_interval
     clickUrl?: string; // DB: click_url
     isActive: boolean; // DB: is_active
     timestamp: string;

@@ -1,6 +1,17 @@
 import { NewsItem, ShortItem, NewsType } from '../types';
 
-const API_URL = 'https://samanyudu-api.onrender.com/api';
+const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'http://localhost:5000/api'
+    : `http://${window.location.hostname}:5000/api`;
+
+export const normalizeMediaUrl = (url: string | undefined): string => {
+    if (!url) return '';
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+        // Replace any IP address based URL (e.g. http://172.16.x.x:5000/uploads) with localhost
+        return url.replace(/^http:\/\/[0-9.]+:5000\/uploads/, 'http://localhost:5000/uploads');
+    }
+    return url;
+};
 
 export const api = {
     // --- NEWS ---
@@ -125,6 +136,8 @@ export const api = {
                 title: short.title,
                 video_url: short.videoUrl,
                 duration: short.duration,
+                area: short.area,
+                author: short.author,
             })
         });
         if (!res.ok) throw new Error('Failed to create short');
@@ -162,6 +175,7 @@ export const api = {
             mediaUrl: item.media_url,
             intervalMinutes: item.interval_minutes,
             clickUrl: item.click_url,
+            displayInterval: item.display_interval,
             isActive: item.is_active,
             timestamp: item.timestamp
         }));
@@ -174,6 +188,7 @@ export const api = {
             body: JSON.stringify({
                 media_url: ad.mediaUrl,
                 interval_minutes: ad.intervalMinutes,
+                display_interval: ad.displayInterval || 4,
                 click_url: ad.clickUrl,
                 is_active: ad.isActive,
             })
@@ -194,6 +209,7 @@ export const api = {
         const updates: any = {};
         if (ad.mediaUrl !== undefined) updates.media_url = ad.mediaUrl;
         if (ad.intervalMinutes !== undefined) updates.interval_minutes = ad.intervalMinutes;
+        if (ad.displayInterval !== undefined) updates.display_interval = ad.displayInterval;
         if (ad.clickUrl !== undefined) updates.click_url = ad.clickUrl;
         if (ad.isActive !== undefined) updates.is_active = ad.isActive;
 
@@ -208,6 +224,7 @@ export const api = {
             id: data.id,
             mediaUrl: data.media_url,
             intervalMinutes: data.interval_minutes,
+            displayInterval: data.display_interval,
             clickUrl: data.click_url,
             isActive: data.is_active,
             timestamp: data.timestamp
@@ -288,5 +305,47 @@ export const api = {
     async deleteReporter(id: string) {
         const res = await fetch(`${API_URL}/admin/reporters/${id}`, { method: 'DELETE' });
         if (!res.ok) throw new Error('Failed to delete reporter');
+    },
+
+    // --- INTERACTIONS (Likes & Comments) ---
+    async likeNews(id: string, userId: string, action: 'like' | 'unlike') {
+        const res = await fetch(`${API_URL}/news/${id}/like`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: userId, action })
+        });
+        if (!res.ok) throw new Error('Failed to update news like');
+        return await res.json();
+    },
+
+    async likeShort(id: string, userId: string, action: 'like' | 'unlike') {
+        const res = await fetch(`${API_URL}/shorts/${id}/like`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: userId, action })
+        });
+        if (!res.ok) throw new Error('Failed to update short like');
+        return await res.json();
+    },
+
+    async getComments(id: string, type: 'news' | 'shorts') {
+        const res = await fetch(`${API_URL}/${type}/${id}/comments`);
+        if (!res.ok) throw new Error('Failed to fetch comments');
+        return await res.json();
+    },
+
+    async postComment(id: string, type: 'news' | 'shorts', commentData: { user_id: string, user_name: string, comment_text: string }) {
+        const res = await fetch(`${API_URL}/${type}/comments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...commentData, [type === 'news' ? 'news_id' : 'short_id']: id })
+        });
+        if (!res.ok) throw new Error('Failed to post comment');
+        return await res.json();
+    },
+
+    async deleteComment(id: string, type: 'news' | 'shorts') {
+        const res = await fetch(`${API_URL}/${type}/comments/${id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Failed to delete comment');
     }
 };
