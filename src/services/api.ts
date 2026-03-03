@@ -1,12 +1,11 @@
 import { NewsItem, ShortItem, NewsType } from '../types';
 
-const API_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-    ? 'http://localhost:5000/api'
-    : `http://${window.location.hostname}:5000/api`;
+// const API_URL = 'http://64.227.166.123/api';
+const API_URL = 'http://localhost:5000/api';
 
 export const normalizeMediaUrl = (url: string | undefined): string => {
     if (!url) return '';
-    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    if (!import.meta.env.PROD) {
         // Replace any IP address based URL (e.g. http://172.16.x.x:5000/uploads) with localhost
         return url.replace(/^http:\/\/[0-9.]+:5000\/uploads/, 'http://localhost:5000/uploads');
     }

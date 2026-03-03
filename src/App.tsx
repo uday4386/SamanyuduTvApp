@@ -92,7 +92,10 @@ const Sidebar = ({ activeTab, setActiveTab, mobileOpen, setMobileOpen, user, onL
       <div className={`fixed md:static inset-y-0 left-0 z-[120] w-56 bg-[#0f172a] border-r border-slate-800 transform transition-transform duration-200 ease-in-out ${mobileOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}`}>
         <div className="flex flex-col h-full">
           <div className="p-6 border-b border-slate-800 flex justify-center">
-            <img src={logoImage} alt="SAMANYUDU TV" className="h-16 object-contain" />
+            <div className="flex flex-col items-center">
+              <img src={logoImage} alt="SAMANYUDU TV" className="h-16 object-contain" />
+              <p className="text-[10px] text-yellow-500 font-bold mt-1 tracking-widest uppercase opacity-80">(CLOUD PRODUCTION)</p>
+            </div>
           </div>
 
           <nav className="flex-1 py-6 px-3 space-y-1 overflow-y-auto">
