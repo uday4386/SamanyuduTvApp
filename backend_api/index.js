@@ -1,17 +1,40 @@
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
 const cors = require('cors');
 const db = require('./db');
 const multer = require('multer');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-const path = require('path');
 const fs = require('fs');
 const archiver = require('archiver');
 const fetch = require('node-fetch'); // For AuthKey API
+const axios = require('axios');
 const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 const puppeteer = require('puppeteer');
 
 const app = express();
+
+// Auto-fix database schema
+(async () => {
+    try {
+        await db.query(`
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='firebase_uid') THEN
+                    ALTER TABLE users ADD COLUMN firebase_uid VARCHAR;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='name') THEN
+                    ALTER TABLE users ADD COLUMN name VARCHAR;
+                END IF;
+            END $$;`);
+        console.log('Database schema checked and updated.');
+    } catch (err) {
+        console.error('Error auto-fixing schema:', err);
+    }
+})();
+
 const port = process.env.PORT || 5000;
 const useLocal = process.env.USE_LOCAL === 'true'; // Set to false for production / cloud
 
@@ -20,22 +43,34 @@ const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir);
 }
+const uploadStaticOptions = {
+    setHeaders: (res) => {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,OPTIONS');
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    }
+};
+app.use('/api/uploads', express.static(uploadsDir, uploadStaticOptions));
+app.use('/uploads', express.static(uploadsDir, uploadStaticOptions));
 
 // Email Transporter
-const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: parseInt(process.env.SMTP_PORT),
-    secure: process.env.SMTP_PORT == '465', // true for 465, false for 587
-    auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-    },
-    tls: {
-        rejectUnauthorized: false
-    }
-});
+const transporter = (process.env.SMTP_HOST && process.env.SMTP_PORT && process.env.SMTP_USER && process.env.SMTP_PASS)
+    ? nodemailer.createTransport({
+        host: process.env.SMTP_HOST,
+        port: parseInt(process.env.SMTP_PORT, 10),
+        secure: process.env.SMTP_PORT === '465',
+        auth: {
+            user: process.env.SMTP_USER,
+            pass: process.env.SMTP_PASS,
+        },
+        tls: {
+            rejectUnauthorized: false
+        }
+    })
+    : null;
 
 // In-memory OTP store (Use Redis for production)
+const mobileOtpStore = new Map();
 const emailOtpStore = new Map();
 
 // Middleware
@@ -50,32 +85,61 @@ const allowedOrigins = [
     'http://127.0.0.1:8080',
     'http://192.168.29.208:5000',
     'http://192.168.29.208:5173',
+    'https://samanyudutv.in',
+    'https://www.samanyudutv.in',
+    'https://admin.samanyudutv.in',
+    'https://api.samanyudutv.in',
     process.env.ADMIN_URL,
     process.env.MOBILE_WEB_URL
 ].filter(Boolean);
 
+const localhostOriginPattern = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
+
 app.use(cors({
     origin: function (origin, callback) {
-        if (!origin || allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
+        if (!origin || allowedOrigins.includes(origin) || localhostOriginPattern.test(origin)) {
             callback(null, true);
         } else {
             callback(new Error('Not allowed by CORS'));
         }
     },
-    credentials: true
+    credentials: true,
+    exposedHeaders: ['Content-Disposition', 'Content-Type']
 }));
-app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+app.use((err, req, res, next) => {
+    if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+        console.error('Invalid JSON payload:', err.message);
+        return res.status(400).json({ error: 'Invalid JSON payload' });
+    }
+    return next(err);
+});
 
 // R2 Storage Configuration
-const S3 = new S3Client({
-    region: 'auto',
-    endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-    credentials: {
-        accessKeyId: process.env.R2_ACCESS_KEY_ID,
-        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
-    },
-});
+function hasR2Config() {
+    return Boolean(
+        process.env.R2_BUCKET_NAME &&
+        process.env.R2_ACCESS_KEY_ID &&
+        process.env.R2_SECRET_ACCESS_KEY &&
+        process.env.CLOUDFLARE_ACCOUNT_ID
+    );
+}
+
+function getS3Client() {
+    if (!hasR2Config()) {
+        return null;
+    }
+
+    return new S3Client({
+        region: 'auto',
+        endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+        credentials: {
+            accessKeyId: process.env.R2_ACCESS_KEY_ID,
+            secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+        },
+    });
+}
 
 const upload = multer({
     storage: multer.memoryStorage(),
@@ -85,8 +149,14 @@ const upload = multer({
 // ==========================================
 // HEALTH CHECK & ONE-TIME DB SETUP
 // ==========================================
-app.get('/api/health', (req, res) => {
-    res.status(200).json({ status: 'ok', msg: 'Hetzner API Backend is running!' });
+app.get('/api/health', async (req, res) => {
+    try {
+        await db.query('SELECT 1');
+        res.status(200).json({ status: 'ok', db: 'ok', msg: 'DigitalOcean API backend is running!' });
+    } catch (error) {
+        console.error('Health check DB error:', error.message);
+        res.status(500).json({ status: 'error', db: 'down', error: 'Database connection failed' });
+    }
 });
 
 app.get('/api/init-db', async (req, res) => {
@@ -101,197 +171,444 @@ app.get('/api/init-db', async (req, res) => {
 });
 
 // ==========================================
-// AUTHENTICATION (AUTHKEY.IO OTP)
+// AUTHENTICATION (FAST2SMS OTP)
 // ==========================================
-const AUTHKEY_API = process.env.AUTHKEY_API_KEY || '';
-const AUTHKEY_SID = process.env.AUTHKEY_SID || 'YOUR_SID_HERE';
+const FAST2SMS_API_KEY = process.env.FAST2SMS_API_KEY || '';
+const MESSAGE_CENTRAL_CUSTOMER_ID = process.env.MESSAGE_CENTRAL_CUSTOMER_ID || '';
+const MESSAGE_CENTRAL_API_KEY = process.env.MESSAGE_CENTRAL_API_KEY || '';
+const TWO_FACTOR_API_KEY = process.env.TWO_FACTOR_API_KEY || '';
+
+// Helper to get Message Central Auth Token
+async function getMessageCentralToken() {
+    try {
+        const url = `https://cpaas.messagecentral.com/auth/v1/authentication/token?customerId=${MESSAGE_CENTRAL_CUSTOMER_ID}&key=${MESSAGE_CENTRAL_API_KEY}&scope=NEW`;
+        const response = await axios.post(url); // Often works as POST or GET
+        return response.data.token;
+    } catch (err) {
+        console.error('Error generating Message Central token:', err.message);
+        return null;
+    }
+}
+
+
+function normalizeIndianPhone(phone = '') {
+    let normalizedPhone = String(phone).replace(/\D/g, '');
+    if (normalizedPhone.length === 12 && normalizedPhone.startsWith('91')) {
+        normalizedPhone = normalizedPhone.substring(2);
+    }
+    return normalizedPhone;
+}
+
+function isValidIndianMobile(phone = '') {
+    return /^\d{10}$/.test(phone);
+}
 
 app.post('/api/auth/send-otp', async (req, res) => {
     try {
         let { phone } = req.body;
-        // Strip non-digits
         phone = phone.replace(/\D/g, '');
-        // If it starts with 91 and is 12 digits, remove the 91
-        if (phone.length === 12 && phone.startsWith('91')) {
-            phone = phone.substring(2);
+        if (phone.length === 10) phone = '91' + phone;
+
+        // Check for existing user before sending OTP
+        const { rows: userCheck } = await db.query('SELECT 1 FROM users WHERE phone = $1', [phone.substring(phone.length - 10)]);
+        if (userCheck.length > 0) {
+            return res.status(400).json({ error: 'మొబైల్ నంబర్ ఇప్పటికే నమోదు చేయబడింది. దయచేసి లాగిన్ చేయండి.' }); // Translated: Mobile number already registered. Please login.
         }
 
-        if (!phone || phone.length !== 10) {
-            return res.status(400).json({ error: 'Valid 10-digit phone number is required' });
+        // 1. Try Message Central (Primary)
+        if (MESSAGE_CENTRAL_CUSTOMER_ID && MESSAGE_CENTRAL_API_KEY) {
+            try {
+                // If key is a JWT, use it directly as the token
+                let token = MESSAGE_CENTRAL_API_KEY.startsWith('eyJ')
+                    ? MESSAGE_CENTRAL_API_KEY
+                    : await getMessageCentralToken();
+
+                if (token) {
+                    const sendUrl = 'https://cpaas.messagecentral.com/verification/v3/send';
+                    const payload = {
+                        customerId: MESSAGE_CENTRAL_CUSTOMER_ID,
+                        countryCode: '91',
+                        mobileNumber: phone.substring(phone.length - 10),
+                        flowId: 'default', // Using your default flow
+                        flowType: 'SMS',   // Force SMS flow
+                        type: 'OTP',       // Verication type
+                        isFallbackEnable: false // DISABLE VOICE FALLBACK
+                    };
+
+                    console.log(`[OTP] Requesting SMS from MC for ${phone}...`);
+                    const response = await axios.post(sendUrl, payload, {
+                        headers: { 'authToken': token }
+                    });
+                    console.log(`[OTP] MC Response:`, JSON.stringify(response.data));
+
+                    if (response.data.responseCode === 200) {
+                        mobileOtpStore.set(phone.substring(phone.length - 10), {
+                            use_mc: true,
+                            expires: Date.now() + 10 * 60 * 1000
+                        });
+                        return res.json({ success: true, message: 'OTP sent successfully via Message Central' });
+                    }
+                }
+            } catch (err) {
+                console.error('Message Central failed:', err.response?.data || err.message);
+            }
         }
 
-        // Authkey API URL for sending SMS OTP
-        const url = `https://api.authkey.io/request?authkey=${AUTHKEY_API}&mobile=${phone}&country_code=91&sid=${AUTHKEY_SID}&company=Samanyudu`;
+        // 2. Fallbacks (2Factor & Fast2SMS)
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        mobileOtpStore.set(phone.substring(phone.length - 10), { otp, expires: Date.now() + 10 * 60 * 1000 });
 
-        console.log(`Calling AuthKey: https://api.authkey.io/request?authkey=***&mobile=${phone}&country_code=91&sid=${AUTHKEY_SID}`);
-
-        const response = await fetch(url);
-        const data = await response.json();
-
-        console.log("AuthKey Send Response:", data);
-
-        if (data.Message && data.Message.toLowerCase().includes('success')) {
-            return res.json({ success: true, message: 'OTP sent successfully' });
-        } else {
-            return res.status(400).json({ error: 'Failed to send OTP via provider' });
+        if (TWO_FACTOR_API_KEY) {
+            try {
+                const url = `https://2factor.in/API/V1/${TWO_FACTOR_API_KEY}/SMS/${phone}/${otp}/OTP1`;
+                const response = await axios.get(url);
+                if (response.data.Status === 'Success') {
+                    console.log(`[OTP] Sent via 2Factor (SMS) to ${phone}`);
+                    return res.json({ success: true, message: 'OTP sent successfully via 2Factor' });
+                }
+            } catch (err) {
+                console.error('2Factor fallback failed:', err.message);
+            }
         }
+
+        if (FAST2SMS_API_KEY) {
+            try {
+                const phone10 = phone.substring(phone.length - 10);
+                const url = `https://www.fast2sms.com/dev/bulkV2?authorization=${FAST2SMS_API_KEY}&route=otp&variables_values=${otp}&numbers=${phone10}`;
+                const response = await axios.get(url);
+                if (response.data.return) {
+                    console.log(`[OTP] Sent via Fast2SMS to ${phone10}`);
+                    return res.json({ success: true, message: 'OTP sent successfully via Fast2SMS' });
+                }
+            } catch (err) {
+                console.error('Fast2SMS fallback failed:', err.message);
+            }
+        }
+        return res.status(400).json({ error: 'Failed to send OTP. Service issue.' });
     } catch (err) {
-        console.error("Error sending OTP:", err);
-        res.status(500).json({ error: 'Internal Server Error sending OTP' });
+        console.error('Error sending OTP:', err);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+app.post('/api/auth/verify-otp', async (req, res) => {
+    try {
+        let { phone, otp } = req.body;
+        phone = phone.replace(/\D/g, '');
+        phone = phone.substring(phone.length - 10);
+        otp = String(otp || '').trim();
+
+        const storedData = mobileOtpStore.get(phone);
+        if (!storedData || storedData.expires < Date.now()) {
+            return res.status(400).json({ error: 'Invalid or expired OTP' });
+        }
+
+        if (storedData.use_mc) {
+            try {
+                const token = await getMessageCentralToken();
+                if (!token) throw new Error('Failed to get MC token');
+
+                const validateUrl = `https://api.messagecentral.com/verification/v3/validate?mobileNumber=${phone}&verificationCode=${otp}`;
+                const response = await axios.get(validateUrl, {
+                    headers: { 'authToken': token }
+                });
+
+                if (response.data.responseCode === 200 && response.data.data.verificationStatus === 'VERIFIED') {
+                    // Mark as verified in our store so register/reset routes can trust it
+                    mobileOtpStore.set(phone, { ...storedData, verified: true });
+                    return res.json({ success: true, message: 'OTP verified successfully' });
+                }
+                return res.status(400).json({ error: 'Invalid or expired OTP from Message Central' });
+            } catch (err) {
+                console.error('Message Central Validation Error:', err.response?.data || err.message);
+                return res.status(500).json({ error: 'Verification service error' });
+            }
+        }
+
+        if (storedData.otp !== otp) {
+            return res.status(400).json({ error: 'Invalid OTP' });
+        }
+
+        return res.json({ success: true, message: 'OTP verified successfully' });
+    } catch (err) {
+        console.error('Error verifying OTP:', err.message);
+        return res.status(500).json({ error: 'Internal Server Error verifying OTP' });
     }
 });
 
 app.post('/api/auth/register-mobile', async (req, res) => {
     try {
         let { firstName, lastName, phone, otp, password } = req.body;
-
-        if (!firstName || !lastName || !phone || !otp || !password) {
-            return res.status(400).json({ error: 'All fields are required' });
-        }
-
+        if (!firstName || !lastName || !phone || !otp || !password) return res.status(400).json({ error: 'All fields are required' });
         phone = phone.replace(/\D/g, '');
-        if (phone.length === 12 && phone.startsWith('91')) {
-            phone = phone.substring(2);
-        }
+        phone = phone.substring(phone.length - 10);
 
-        // Check if user already exists
-        const { rows: existingUser } = await db.query('SELECT * FROM users WHERE phone = $1', [phone]);
-        if (existingUser.length > 0) {
-            return res.status(400).json({ error: 'Phone number already registered' });
-        }
-
-        // Authkey API URL for verifying OTP
-        const url = `https://api.authkey.io/request?authkey=${AUTHKEY_API}&mobile=${phone}&country_code=91&sid=${AUTHKEY_SID}&company=Samanyudu&otp=${otp}`;
-
-        const response = await fetch(url);
-        const data = await response.json();
-
-        console.log("AuthKey Verify Response:", data);
-
-        if (data.Message && (data.Message.toLowerCase().includes('success') || data.Message.toLowerCase().includes('verified'))) {
-            // Insert new user
-            const query = 'INSERT INTO users (first_name, last_name, phone, password, name) VALUES ($1, $2, $3, $4, $5) RETURNING *';
-            const result = await db.query(query, [firstName, lastName, phone, password, `${firstName} ${lastName}`.trim()]);
-            const user = result.rows[0];
-
-            return res.json({
-                success: true,
-                message: 'User registered successfully',
-                user: { id: user.id, phone: user.phone, name: user.name || `${user.first_name} ${user.last_name}`.trim() }
-            });
-        } else {
+        const storedData = mobileOtpStore.get(phone);
+        if (!storedData || storedData.expires < Date.now()) {
             return res.status(400).json({ error: 'Invalid or expired OTP' });
         }
+
+        // If using MC, it must have been marked as verified by the verify-otp route
+        if (storedData.use_mc) {
+            if (!storedData.verified) {
+                try {
+                    const token = await getMessageCentralToken();
+                    const validateUrl = `https://api.messagecentral.com/verification/v3/validate?mobileNumber=${phone}&verificationCode=${otp}`;
+                    const response = await axios.get(validateUrl, { headers: { 'authToken': token } });
+                    if (response.data.responseCode !== 200 || response.data.data.verificationStatus !== 'VERIFIED') {
+                        return res.status(400).json({ error: 'Invalid OTP' });
+                    }
+                } catch (err) {
+                    console.error('MC Validation failed in register-mobile:', err.message);
+                    return res.status(500).json({ error: 'OTP validation failed' });
+                }
+            }
+        } else if (storedData.otp !== otp) {
+            return res.status(400).json({ error: 'Invalid OTP' });
+        }
+
+        const { rows: existing } = await db.query('SELECT * FROM users WHERE phone = $1', [phone]);
+        if (existing.length > 0) return res.status(400).json({ error: 'Phone already registered' });
+
+        const passTrimmed = String(password).trim();
+        const query = 'INSERT INTO users (first_name, last_name, phone, password, name) VALUES ($1, $2, $3, $4, $5) RETURNING *';
+        const result = await db.query(query, [firstName, lastName, phone, passTrimmed, `${firstName} ${lastName}`.trim()]);
+        mobileOtpStore.delete(phone);
+        res.json({ success: true, user: { id: result.rows[0].id, phone: result.rows[0].phone, name: result.rows[0].name } });
     } catch (err) {
         console.error("Error registering via mobile:", err);
-        res.status(500).json({ error: 'Internal Server Error registering user' });
+        res.status(500).json({ error: 'Internal Server Error' });
     }
 });
 
-// Login with Mobile and Password
+// 2b. Register/Sync Firebase User
+app.post('/api/auth/register-firebase', async (req, res) => {
+    try {
+        const { uid, email, firstName, lastName } = req.body;
+        if (!uid || !email) return res.status(400).json({ error: 'UID and Email are required' });
+
+        const { rows } = await db.query('SELECT * FROM users WHERE email = $1', [email]);
+        let user;
+
+        if (rows.length > 0) {
+            // Update existing user - only update names if provided
+            let query = 'UPDATE users SET firebase_uid = $1';
+            let params = [uid];
+
+            if (firstName && lastName) {
+                query += ', first_name = $2, last_name = $3, name = $4';
+                params.push(firstName, lastName, `${firstName} ${lastName}`.trim());
+            }
+
+            query += ' WHERE email = $' + (params.length + 1) + ' RETURNING *';
+            params.push(email);
+
+            const updateResult = await db.query(query, params);
+            user = updateResult.rows[0];
+        } else {
+            // New user - use provided names or default to "User"
+            const fName = firstName || 'User';
+            const lName = lastName || '';
+            const fullName = `${fName} ${lName}`.trim();
+
+            const insertResult = await db.query(
+                'INSERT INTO users (email, first_name, last_name, name, firebase_uid) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+                [email, fName, lName, fullName, uid]
+            );
+            user = insertResult.rows[0];
+        }
+        res.json({ success: true, user: { id: user.id, email: user.email, name: user.name || `${user.first_name} ${user.last_name}`.trim() } });
+    } catch (err) {
+        console.error("Error syncing Firebase user:", err);
+        res.status(500).json({ error: 'Failed to sync user' });
+    }
+});
+
+// 2c. Register/Sync Firebase Phone User
+app.post('/api/auth/register-firebase-phone', async (req, res) => {
+    try {
+        let { uid, phone, firstName, lastName } = req.body;
+        if (!uid || !phone) return res.status(400).json({ error: 'UID and Phone are required' });
+
+        phone = phone.replace(/\D/g, '');
+        phone = phone.substring(phone.length - 10);
+
+        // Check if user exists by phone
+        const { rows } = await db.query('SELECT * FROM users WHERE phone = $1', [phone]);
+        let user;
+
+        if (rows.length > 0) {
+            // Update existing user with UID
+            const updateResult = await db.query(
+                'UPDATE users SET firebase_uid = $1 WHERE phone = $2 RETURNING *',
+                [uid, phone]
+            );
+            user = updateResult.rows[0];
+        } else {
+            // Create new user
+            const fName = firstName || 'User';
+            const lName = lastName || '';
+            const fullName = `${fName} ${lName}`.trim();
+
+            const insertResult = await db.query(
+                'INSERT INTO users (phone, first_name, last_name, name, firebase_uid) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+                [phone, fName, lName, fullName, uid]
+            );
+            user = insertResult.rows[0];
+        }
+
+        res.json({
+            success: true,
+            user: {
+                id: user.id,
+                phone: user.phone,
+                name: user.name || `${user.first_name} ${user.last_name}`.trim()
+            }
+        });
+    } catch (err) {
+        console.error("Error syncing Firebase phone user:", err);
+        res.status(500).json({ error: 'Failed to sync user' });
+    }
+});
+
+
+// Reset Password with Mobile OTP
+app.post('/api/auth/reset-password-mobile', async (req, res) => {
+    try {
+        let { phone, otp, newPassword } = req.body;
+        if (!phone || !otp || !newPassword) return res.status(400).json({ error: 'Phone, OTP and new password are required' });
+
+        phone = phone.replace(/\D/g, '');
+        phone = phone.substring(phone.length - 10);
+
+        const storedData = mobileOtpStore.get(phone);
+        if (!storedData || storedData.expires < Date.now()) {
+            return res.status(400).json({ error: 'Invalid or expired OTP' });
+        }
+
+        if (storedData.use_mc) {
+            if (!storedData.verified) {
+                try {
+                    const token = await getMessageCentralToken();
+                    const validateUrl = `https://api.messagecentral.com/verification/v3/validate?mobileNumber=${phone}&verificationCode=${otp}`;
+                    const response = await axios.get(validateUrl, { headers: { 'authToken': token } });
+                    if (response.data.responseCode !== 200 || response.data.data.verificationStatus !== 'VERIFIED') {
+                        return res.status(400).json({ error: 'Invalid OTP' });
+                    }
+                } catch (err) {
+                    return res.status(500).json({ error: 'OTP validation failed' });
+                }
+            }
+        } else if (storedData.otp !== String(otp).trim()) {
+            console.log(`[Reset] OTP mismatch for ${phone}. Input: ${otp}, Stored: ${storedData?.otp}`);
+            return res.status(400).json({ error: 'Invalid or expired OTP' });
+        }
+
+        console.log(`[Reset] Updating password for ${phone}. New length: ${newPassword.length}`);
+        const { rowCount } = await db.query('UPDATE users SET password = $1 WHERE phone = $2', [newPassword.trim(), phone]);
+
+        if (rowCount === 0) {
+            console.warn(`[Reset] Found no user with phone ${phone}`);
+            return res.status(404).json({ error: 'Account not found for this phone number' });
+        }
+
+        mobileOtpStore.delete(phone);
+        res.json({ success: true, message: 'Password reset successfully' });
+    } catch (err) {
+        console.error("Error resetting password:", err);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
+
+// 3b. Login with Mobile and Password
 app.post('/api/auth/login-mobile', async (req, res) => {
     try {
         let { phone, password } = req.body;
-        if (!phone || !password) return res.status(400).json({ error: 'Phone number and password are required' });
+        if (!phone || !password) return res.status(400).json({ error: 'Phone and password are required' });
 
         phone = phone.replace(/\D/g, '');
-        if (phone.length === 12 && phone.startsWith('91')) {
-            phone = phone.substring(2);
-        }
+        phone = phone.substring(phone.length - 10);
+        const passTrimmed = String(password).trim();
 
-        const { rows } = await db.query('SELECT * FROM users WHERE phone = $1 AND password = $2', [phone, password]);
+        console.log(`[Login] Attempt for ${phone}`);
+        const { rows } = await db.query('SELECT * FROM users WHERE phone = $1 AND password = $2', [phone, passTrimmed]);
+
         if (rows.length === 0) {
-            return res.status(401).json({ error: 'Invalid phone number or password' });
+            // Optional: try to find user by phone only to give better error
+            const { rows: checkUser } = await db.query('SELECT password FROM users WHERE phone = $1', [phone]);
+            if (checkUser.length > 0) {
+                console.warn(`[Login] Wrong password for ${phone}`);
+                return res.status(401).json({ error: 'Incorrect password' });
+            } else {
+                console.warn(`[Login] Phone not found ${phone}`);
+                return res.status(401).json({ error: 'No account found with this phone number' });
+            }
         }
 
         const user = rows[0];
+        console.log(`[Login] Success for ${user.id} (${phone})`);
         res.json({
             success: true,
             user: { id: user.id, phone: user.phone, name: user.name || `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'User' }
         });
     } catch (err) {
-        console.error("Error logging in mobile:", err);
+        console.error("Error logging in via mobile:", err);
         res.status(500).json({ error: 'Internal Server Error' });
     }
 });
 
-// ==========================================
-// EMAIL AUTHENTICATION
-// ==========================================
-
-// 1. Send OTP to Email
-app.post('/api/auth/send-email-otp', async (req, res) => {
+app.post('/api/auth/login-otp', async (req, res) => {
     try {
-        const { email } = req.body;
-        console.log(`[Email Auth] Request to send OTP to: ${email}`);
-        if (!email) return res.status(400).json({ error: 'Email is required' });
+        let { phone, otp } = req.body;
+        if (!phone || !otp) return res.status(400).json({ error: 'Phone and OTP are required' });
 
-        const otp = Math.floor(100000 + Math.random() * 900000).toString();
-        emailOtpStore.set(email, { otp, expires: Date.now() + 10 * 60 * 1000 }); // 10 mins
+        phone = phone.replace(/\D/g, '');
+        phone = phone.substring(phone.length - 10);
 
-        const mailOptions = {
-            from: process.env.SMTP_FROM,
-            to: email,
-            subject: 'Samanyudu TV - Verification Code',
-            text: `Your verification code is: ${otp}. This code will expire in 10 minutes.`,
-            html: `<h3>Samanyudu TV Verification</h3><p>Your verification code is: <b>${otp}</b></p><p>This code will expire in 10 minutes.</p>`,
-        };
-
-        console.log(`[Email Auth] Sending email using: ${process.env.SMTP_USER}`);
-        await transporter.sendMail(mailOptions);
-        console.log(`[Email Auth] OTP sent successfully to: ${email}`);
-        res.json({ success: true, message: 'OTP sent to email successfully' });
-    } catch (err) {
-        console.error("[Email Auth] Error sending email OTP:", err);
-        res.status(500).json({ error: 'Failed to send email OTP', details: err.message });
-    }
-});
-
-// 2. Register User with Email and Password
-app.post('/api/auth/register-email', async (req, res) => {
-    try {
-        const { firstName, lastName, email, otp, password } = req.body;
-
-        if (!firstName || !lastName || !email || !otp || !password) {
-            return res.status(400).json({ error: 'All fields are required' });
-        }
-
-        const storedData = emailOtpStore.get(email);
-        if (!storedData || storedData.otp !== otp || storedData.expires < Date.now()) {
+        const storedData = mobileOtpStore.get(phone);
+        if (!storedData || storedData.expires < Date.now()) {
             return res.status(400).json({ error: 'Invalid or expired OTP' });
         }
 
-        // Check if user already exists
-        const { rows } = await db.query('SELECT * FROM users WHERE email = $1', [email]);
-        if (rows.length > 0) {
-            return res.status(400).json({ error: 'Email already registered' });
+        if (storedData.use_mc) {
+            try {
+                const token = await getMessageCentralToken();
+                const validateUrl = `https://api.messagecentral.com/verification/v3/validate?mobileNumber=${phone}&verificationCode=${otp}`;
+                const response = await axios.get(validateUrl, { headers: { 'authToken': token } });
+                if (response.data.responseCode !== 200 || response.data.data.verificationStatus !== 'VERIFIED') {
+                    return res.status(400).json({ error: 'Invalid OTP' });
+                }
+            } catch (err) {
+                return res.status(500).json({ error: 'OTP validation service error' });
+            }
+        } else if (storedData.otp !== String(otp).trim()) {
+            return res.status(400).json({ error: 'Invalid OTP' });
         }
 
-        // Insert new user
-        const query = 'INSERT INTO users (first_name, last_name, email, password) VALUES ($1, $2, $3, $4) RETURNING *';
-        const result = await db.query(query, [firstName, lastName, email, password]);
-        const user = result.rows[0];
+        const { rows } = await db.query('SELECT * FROM users WHERE phone = $1', [phone]);
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'No account found for this phone. Please sign up first.' });
+        }
 
-        emailOtpStore.delete(email);
-
+        const user = rows[0];
+        mobileOtpStore.delete(phone);
         res.json({
             success: true,
-            message: 'User registered successfully',
-            user: { id: user.id, email: user.email, name: `${user.first_name} ${user.last_name}` }
+            user: { id: user.id, phone: user.phone, name: user.name || `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'User' }
         });
     } catch (err) {
-        console.error("Error registering user:", err);
-        res.status(500).json({ error: 'Failed to register user' });
+        console.error("Error logging in via OTP:", err);
+        res.status(500).json({ error: 'Internal Server Error' });
     }
 });
 
 // 3. Login with Email and Password
 app.post('/api/auth/login-email', async (req, res) => {
     try {
-        const { email, password } = req.body;
-        if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+        const passTrimmed = String(password).trim();
 
-        const { rows } = await db.query('SELECT * FROM users WHERE email = $1 AND password = $2', [email, password]);
+        const { rows } = await db.query('SELECT * FROM users WHERE email = $1 AND password = $2', [email, passTrimmed]);
         if (rows.length === 0) {
             return res.status(401).json({ error: 'Invalid email or password' });
         }
@@ -416,6 +733,29 @@ app.delete('/api/admin/reporters/:id', async (req, res) => {
     }
 });
 
+// Maintenance Mode
+app.get('/api/admin/settings/maintenance', async (req, res) => {
+    try {
+        const { rows } = await db.query("SELECT value FROM app_settings WHERE key = 'maintenance_mode'");
+        const enabled = rows.length > 0 ? rows[0].value : false;
+        res.json({ enabled });
+    } catch (error) {
+        console.error('Fetch maintenance error:', error);
+        res.status(500).json({ error: 'Failed to fetch maintenance status' });
+    }
+});
+
+app.post('/api/admin/settings/maintenance', async (req, res) => {
+    try {
+        const { enabled } = req.body;
+        await db.query("INSERT INTO app_settings (key, value) VALUES ('maintenance_mode', $1) ON CONFLICT (key) DO UPDATE SET value = $1", [JSON.stringify(enabled)]);
+        res.json({ success: true, enabled });
+    } catch (error) {
+        console.error('Update maintenance error:', error);
+        res.status(500).json({ error: 'Failed to update maintenance status' });
+    }
+});
+
 // ==========================================
 // MIGRATED ROUTES: NEWS
 // ==========================================
@@ -423,6 +763,28 @@ app.delete('/api/admin/reporters/:id', async (req, res) => {
 app.get('/api/admin/news/archive', async (req, res) => {
     try {
         const { rows } = await db.query('SELECT * FROM news ORDER BY timestamp DESC');
+        const requestedFormat = String(req.query.format || '').toLowerCase();
+        const forceJson = requestedFormat === 'json';
+        const forceDoc = requestedFormat === 'doc' || requestedFormat === 'word' || requestedFormat === 'docx';
+
+        const downloadJsonBackup = () => {
+            const fileName = `Samanyudu_TV_News_Archive_${Date.now()}.json`;
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+            res.send(JSON.stringify(rows, null, 2));
+        };
+
+        const escapeHtml = (value) =>
+            String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+
+        if (forceJson) {
+            return downloadJsonBackup();
+        }
 
         let htmlContent = `
         <!DOCTYPE html>
@@ -440,12 +802,10 @@ app.get('/api/admin/news/archive', async (req, res) => {
                 .news-item { page-break-inside: avoid; border-bottom: 2px solid #e2e8f0; padding-bottom: 30px; margin-bottom: 30px; width: 100%; }
                 .news-item img { display: block; max-width: 100%; max-height: 400px; object-fit: contain; margin: 20px auto 0 auto; border-radius: 8px; }
                 h2 { color: #0f172a; margin: 0 0 15px 0; font-size: 26px; line-height: 1.3; }
-                
                 .meta-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 13px; color: #64748b; }
                 .meta-table td { padding: 15px; text-align: left; vertical-align: top; border-right: 1px solid #e2e8f0; width: 20%; }
                 .meta-table td:last-child { border-right: none; }
                 .meta-table strong { display: block; color: #334155; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; margin-bottom: 5px; }
-                
                 .description { white-space: pre-wrap; line-height: 1.7; color: #334155; font-size: 15px; }
                 .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #94a3b8; padding: 30px 0; page-break-inside: avoid; }
             </style>
@@ -453,27 +813,32 @@ app.get('/api/admin/news/archive', async (req, res) => {
         <body>
             <div class="header">
                 <h1>SAMANYUDU TV</h1>
-                <p>Official News Archive • Generated on ${new Date().toLocaleDateString()}</p>
+                <p>Official News Archive | Generated on ${new Date().toLocaleDateString()}</p>
                 <p>Total Articles: ${rows.length}</p>
             </div>
             <div class="container">
         `;
 
+        const formatDescription = (desc) => {
+            if (!desc) return '';
+            return escapeHtml(desc).replace(/\n/g, '<br/>');
+        };
+
         rows.forEach(item => {
             htmlContent += `
             <div class="news-item">
-                <h2>${item.title || 'Untitled'}</h2>
+                <h2>${escapeHtml(item.title || 'Untitled')}</h2>
                 <table class="meta-table">
                     <tr>
-                        <td><strong>Date</strong> ${new Date(item.timestamp).toLocaleString()}</td>
-                        <td><strong>Area</strong> ${item.area || 'N/A'}</td>
-                        <td><strong>Category</strong> ${item.type || 'N/A'}</td>
-                        <td><strong>Reporter</strong> ${item.author || 'N/A'}</td>
-                        <td><strong>Live Link</strong> ${item.live_link ? `<a href="${item.live_link}" target="_blank">Watch Live</a>` : 'N/A'}</td>
+                        <td><strong>Date</strong> ${escapeHtml(item.timestamp ? new Date(item.timestamp).toLocaleString() : 'N/A')}</td>
+                        <td><strong>Area</strong> ${escapeHtml(item.area || 'N/A')}</td>
+                        <td><strong>Category</strong> ${escapeHtml(item.type || 'N/A')}</td>
+                        <td><strong>Reporter</strong> ${escapeHtml(item.author || 'N/A')}</td>
+                        <td><strong>Live Link</strong> ${item.live_link ? `<a href="${escapeHtml(item.live_link)}" target="_blank" rel="noopener noreferrer">Watch Live</a>` : 'N/A'}</td>
                     </tr>
                 </table>
-                <div class="description">${item.description || ''}</div>
-                ${item.image_url ? `<img src="${item.image_url}" alt="News Image"/>` : ''}
+                <div class="description">${formatDescription(item.description)}</div>
+                ${item.image_url ? `<img src="${escapeHtml(item.image_url)}" alt="News Image"/>` : ''}
             </div>
             `;
         });
@@ -487,36 +852,114 @@ app.get('/api/admin/news/archive', async (req, res) => {
         </html>
         `;
 
-        const browser = await puppeteer.launch({
-            headless: 'new',
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security'] // allow images from cross-origin
-        });
-        const page = await browser.newPage();
-        await page.setContent(htmlContent, { waitUntil: ['load', 'networkidle0'], timeout: 60000 });
+        if (forceDoc) {
+            const fileName = `Samanyudu_TV_News_Archive_${Date.now()}.doc`;
+            // Set headers specifically for MS Word
+            res.setHeader('Content-Type', 'application/msword; charset=UTF-8');
+            res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
 
-        // Wait for all images to explicitly load
-        await page.evaluate(async () => {
-            const selectors = Array.from(document.querySelectorAll("img"));
-            await Promise.all(selectors.map(img => {
-                if (img.complete) return;
-                return new Promise((resolve, reject) => {
-                    img.addEventListener("load", resolve);
-                    img.addEventListener("error", resolve); // resolve on error so we don't hang
-                });
+            // Embed images as base64 for Word compatibility
+            const processedRows = await Promise.all(rows.map(async (item) => {
+                let base64Image = null;
+                if (item.image_url) {
+                    try {
+                        const response = await axios.get(item.image_url, { responseType: 'arraybuffer' });
+                        const buffer = Buffer.from(response.data, 'binary').toString('base64');
+                        const contentType = response.headers['content-type'];
+                        base64Image = `data:${contentType};base64,${buffer}`;
+                    } catch (err) {
+                        console.error('Image fetch error for Word:', err.message);
+                    }
+                }
+                return { ...item, embedded_image: base64Image };
             }));
-        });
 
-        const pdfBuffer = await page.pdf({
-            format: 'A4',
-            printBackground: true,
-            margin: { top: '0px', right: '0px', bottom: '0px', left: '0px' }
-        });
-        await browser.close();
+            // Simpler HTML for Word compatibility and better Telugu support
+            const wordHtml = `
+            <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+            <head>
+                <meta charset="utf-8">
+                <style>
+                    body { font-family: 'Arial Unicode MS', 'Segoe UI', serif; }
+                    h1 { color: #0f172a; text-align: center; border-bottom: 2px solid #eab308; }
+                    .news-item { margin-bottom: 40px; border-bottom: 1px solid #ccc; padding-bottom: 20px; }
+                    .meta { color: #555; font-size: 10pt; margin-bottom: 10px; }
+                    .description { font-size: 11pt; line-height: 1.5; }
+                </style>
+            </head>
+            <body>
+                <h1>SAMANYUDU TV - News Archive</h1>
+                <p style="text-align:center">Generated on ${new Date().toLocaleString()}</p>
+                <hr>
+                ${processedRows.map(item => `
+                    <div class="news-item">
+                        <h2 style="color:#1e293b">${escapeHtml(item.title)}</h2>
+                        <div class="meta">
+                            <b>Date:</b> ${new Date(item.timestamp).toLocaleString()} | 
+                            <b>Area:</b> ${escapeHtml(item.area)} | 
+                            <b>Category:</b> ${escapeHtml(item.type)} | 
+                            <b>Reporter:</b> ${escapeHtml(item.author)}
+                        </div>
+                        <div class="description">${formatDescription(item.description)}</div>
+                        ${item.embedded_image ? `<br><img src="${item.embedded_image}" width="600" style="max-width:100%">` : ''}
+                    </div>
+                `).join('')}
+            </body>
+            </html>`;
 
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename="Samanyudu_TV_News_Archive_${Date.now()}.pdf"`);
-        res.send(pdfBuffer);
+            return res.send(`\uFEFF${wordHtml}`);
+        }
 
+        const launchOptions = {
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security']
+        };
+        if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+            launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+        }
+
+        let browser = null;
+        try {
+            browser = await puppeteer.launch(launchOptions);
+            const page = await browser.newPage();
+            await page.setContent(htmlContent, { waitUntil: 'domcontentloaded', timeout: 120000 });
+
+            // Wait for image load with per-image timeout so backup can't hang forever.
+            await page.evaluate(async () => {
+                const images = Array.from(document.querySelectorAll('img'));
+                await Promise.all(images.map((img) => {
+                    if (img.complete) return Promise.resolve();
+                    return new Promise((resolve) => {
+                        const timeout = setTimeout(resolve, 8000);
+                        img.addEventListener('load', () => {
+                            clearTimeout(timeout);
+                            resolve();
+                        }, { once: true });
+                        img.addEventListener('error', () => {
+                            clearTimeout(timeout);
+                            resolve();
+                        }, { once: true });
+                    });
+                }));
+            });
+
+            const pdfBuffer = await page.pdf({
+                format: 'A4',
+                printBackground: true,
+                margin: { top: '0px', right: '0px', bottom: '0px', left: '0px' }
+            });
+
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="Samanyudu_TV_News_Archive_${Date.now()}.pdf"`);
+            res.send(pdfBuffer);
+        } catch (pdfError) {
+            console.error('PDF archive failed, sending JSON fallback:', pdfError.message);
+            downloadJsonBackup();
+        } finally {
+            if (browser) {
+                await browser.close().catch(() => null);
+            }
+        }
     } catch (error) {
         console.error('Archive failed:', error);
         res.status(500).json({ error: 'Failed to archive data' });
@@ -561,6 +1004,9 @@ app.post('/api/news', async (req, res) => {
         const finalImageUrl = img_url || image_url;
         const finalArea = area || location;
         const finalType = type || category;
+        if (!title || !description || !finalArea) {
+            return res.status(400).json({ error: 'title, description, and area/location are required' });
+        }
         const query = `
       INSERT INTO news(title, description, area, type, image_url, video_url, is_breaking, live_link, status, author)
       VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -572,7 +1018,7 @@ app.post('/api/news', async (req, res) => {
         res.status(201).json(rows[0]);
     } catch (error) {
         console.error('Error inserting news:', error);
-        res.status(500).json({ error: 'Failed to create news' });
+        res.status(500).json({ error: 'Failed to create news', details: error.message });
     }
 });
 
@@ -936,10 +1382,9 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
         const protocol = req.protocol;
         const host = req.get('host'); // e.g. 'localhost:5000' or '172.16.25.5:5000'
 
-        let publicUrl;
+        const localPublicUrl = `${protocol}://${host}/api/uploads/${fileName}`;
+        let publicUrl = localPublicUrl;
         if (useLocal) {
-            publicUrl = `${protocol}://${host}/uploads/${fileName}`;
-
             // Try R2 upload as a backup (non-blocking in local mode)
             const uploadParams = {
                 Bucket: process.env.R2_BUCKET_NAME,
@@ -947,24 +1392,38 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
                 Body: req.file.buffer,
                 ContentType: req.file.mimetype,
             };
-            S3.send(new PutObjectCommand(uploadParams))
-                .then(() => console.log(`[R2] Backup upload successful: ${fileName}`))
-                .catch(err => console.error(`[R2] Backup upload failed (ignoring in local mode):`, err.message));
-        } else {
-            // Production mode: R2 is mandatory
-            const uploadParams = {
-                Bucket: process.env.R2_BUCKET_NAME,
-                Key: fileName,
-                Body: req.file.buffer,
-                ContentType: req.file.mimetype,
-            };
-            await S3.send(new PutObjectCommand(uploadParams));
-
-            if (process.env.R2_PUBLIC_DOMAIN) {
-                publicUrl = `https://${process.env.R2_PUBLIC_DOMAIN}/${fileName}`;
+            const s3 = getS3Client();
+            if (!s3) {
+                console.warn('[R2] Backup upload skipped because configuration is incomplete');
             } else {
-                // Fallback to local if R2 domain is missing
-                publicUrl = `${protocol}://${host}/uploads/${fileName}`;
+                s3.send(new PutObjectCommand(uploadParams))
+                    .then(() => console.log(`[R2] Backup upload successful: ${fileName}`))
+                    .catch(err => console.error(`[R2] Backup upload failed (ignoring in local mode):`, err.message));
+            }
+        } else {
+            const canUseR2 = hasR2Config();
+
+            if (canUseR2) {
+                const s3 = getS3Client();
+                const uploadParams = {
+                    Bucket: process.env.R2_BUCKET_NAME,
+                    Key: fileName,
+                    Body: req.file.buffer,
+                    ContentType: req.file.mimetype,
+                };
+
+                try {
+                    await s3.send(new PutObjectCommand(uploadParams));
+                    if (process.env.R2_PUBLIC_DOMAIN) {
+                        publicUrl = `https://${process.env.R2_PUBLIC_DOMAIN}/${fileName}`;
+                    }
+                } catch (r2Error) {
+                    console.error('[R2] Upload failed, falling back to local file serving:', r2Error.message);
+                    publicUrl = localPublicUrl;
+                }
+            } else {
+                console.warn('[R2] Missing configuration, falling back to local file serving');
+                publicUrl = localPublicUrl;
             }
         }
 
@@ -1002,7 +1461,7 @@ app.post('/api/user/:id/save', async (req, res) => {
         if (action === 'save') {
             await db.query('INSERT INTO saved_items (user_id, item_id, item_type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [id, item_id, item_type || 'news']);
         } else {
-            await db.query('DELETE FROM saved_items WHERE user_id = $1 AND item_id = $2', [id, item_id]);
+            await db.query('DELETE FROM saved_items WHERE user_id = $1 AND item_id = $2 AND item_type = $3', [id, item_id, item_type || 'news']);
         }
         res.json({ success: true });
     } catch (error) {
@@ -1033,7 +1492,103 @@ app.post('/api/user/:id/sync-saved', async (req, res) => {
     }
 });
 
+app.post('/api/auth/send-email-otp', async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ error: 'Email is required' });
+
+        // Check for existing user before sending OTP
+        const { rows: userCheck } = await db.query('SELECT 1 FROM users WHERE email = $1', [email]);
+        if (userCheck.length > 0) {
+            return res.status(400).json({ error: 'ఇమెయిల్ ఇప్పటికే నమోదు చేయబడింది. దయచేసి లాగిన్ చేయండి.' }); // Translated: Email already registered. Please login.
+        }
+
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        emailOtpStore.set(email, { otp, expires: Date.now() + 10 * 60 * 1000 });
+
+        if (resend) {
+            try {
+                await resend.emails.send({
+                    from: 'Samanyudu TV <noreply@samanyudutv.in>',
+                    to: email,
+                    subject: 'Your Signup Verification Code',
+                    html: `<h3>Your Verification Code is: <b>${otp}</b></h3><p>This code will expire in 10 minutes.</p>`
+                });
+                return res.json({ success: true, message: 'OTP sent to email' });
+            } catch (err) {
+                console.error('Resend email failed:', err.message);
+            }
+        }
+
+        if (transporter) {
+            try {
+                await transporter.sendMail({
+                    from: process.env.SMTP_USER,
+                    to: email,
+                    subject: 'Your Signup Verification Code',
+                    html: `<h3>Your Verification Code is: <b>${otp}</b></h3><p>This code will expire in 10 minutes.</p>`
+                });
+                return res.json({ success: true, message: 'OTP sent to email via SMTP' });
+            } catch (err) {
+                console.error('SMTP email failed:', err.message);
+                throw err;
+            }
+        }
+
+        return res.status(400).json({ error: 'Email service not configured' });
+    } catch (err) {
+        console.error('Error sending email OTP:', err);
+        res.status(500).json({ error: 'Failed to send verification email' });
+    }
+});
+
+app.post('/api/auth/register-email', async (req, res) => {
+    try {
+        const { firstName, lastName, email, otp, password } = req.body;
+        if (!firstName || !lastName || !email || !otp || !password) return res.status(400).json({ error: 'All fields are required' });
+
+        const storedData = emailOtpStore.get(email);
+        if (!storedData || storedData.expires < Date.now()) {
+            return res.status(400).json({ error: 'Invalid or expired OTP' });
+        }
+
+        if (storedData.otp !== String(otp).trim()) {
+            return res.status(400).json({ error: 'Invalid OTP' });
+        }
+
+        const { rows: existing } = await db.query('SELECT * FROM users WHERE email = $1', [email]);
+        if (existing.length > 0) return res.status(400).json({ error: 'Email already registered' });
+
+        const passTrimmed = String(password).trim();
+        const fullName = `${firstName} ${lastName}`.trim();
+        const query = 'INSERT INTO users (first_name, last_name, email, password, name) VALUES ($1, $2, $3, $4, $5) RETURNING *';
+        const result = await db.query(query, [firstName, lastName, email, passTrimmed, fullName]);
+
+        emailOtpStore.delete(email);
+        res.json({ success: true, user: { id: result.rows[0].id, email: result.rows[0].email, name: result.rows[0].name } });
+    } catch (err) {
+        console.error("Error registering via email:", err);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
+
 // Start server
 app.listen(port, () => {
     console.log(`🚀 API Backend running on http://localhost:${port}`);
 });
+
+
+// Auto-initialize settings table
+(async () => {
+    try {
+        const db = require('./db');
+        await db.query('CREATE TABLE IF NOT EXISTS app_settings (key VARCHAR PRIMARY KEY, value JSONB)');
+        await db.query("INSERT INTO app_settings (key, value) VALUES ('maintenance_mode', 'false') ON CONFLICT (key) DO NOTHING");
+        console.log('✅ Settings table initialized');
+    } catch (err) {
+        console.error('❌ Failed to initialize settings table:', err.message);
+    }
+})();
+
+
+
